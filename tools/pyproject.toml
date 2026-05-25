@@ -1,0 +1,21 @@
+[project]
+name = "oasis-tools"
+version = "0.1.0"
+description = "Yang et al. (2024) OASIS LLM social-media simulation — visualization & analysis tools"
+requires-python = ">=3.11"
+dependencies = [
+    "matplotlib>=3.8",
+    "numpy>=1.26",
+    "pandas>=2.2",
+    "networkx>=3.2",
+]
+
+[project.scripts]
+oasis-tools = "oasis_tools.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/oasis_tools"]
