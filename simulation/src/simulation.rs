@@ -18,11 +18,8 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::fs::{self, File};
-use std::io::BufWriter;
 use std::rc::Rc;
 
-use csv::Writer;
 use rand::Rng;
 use serde::Serialize;
 
@@ -265,27 +262,24 @@ fn herd_disagree_rate(world: &OasisWorld) -> f64 {
 // --------------------------------------------------------------------------- //
 
 /// メトリクス履歴を long-format CSV (metrics.csv) に保存する．
+///
+/// 各 [`StepMetrics`] を `to_rows()` で long-format 行へ展開し，展開後の行列を
+/// `socsim_results::write_csv` で書き出す (各行を `serialize` し先頭行にヘッダを
+/// 書く csv クレットの標準挙動; 従来の手書き writer とバイト等価)．行構造体は
+/// repo 固有のままで，writer だけを共有化する．
 pub fn save_metrics(metrics: &[StepMetrics], output_dir: &str) {
     let path = format!("{}/metrics.csv", output_dir);
-    let file = File::create(&path).expect("metrics.csv の作成に失敗");
-    let mut wtr = Writer::from_writer(BufWriter::new(file));
-    for m in metrics {
-        for row in m.to_rows() {
-            wtr.serialize(row).expect("メトリクス行の書き込みに失敗");
-        }
-    }
-    wtr.flush().expect("フラッシュに失敗");
+    let rows: Vec<_> = metrics.iter().flat_map(|m| m.to_rows()).collect();
+    socsim_results::write_csv(&rows, &path).expect("metrics.csv の書き込みに失敗");
 }
 
 /// カスケード行を cascades.csv に保存する．
+///
+/// 書き出し機構は `socsim_results::write_csv` に委譲する ([`CascadeRow`] を
+/// `serialize`; 従来の手書き writer とバイト等価)．
 pub fn save_cascades(rows: &[CascadeRow], output_dir: &str) {
     let path = format!("{}/cascades.csv", output_dir);
-    let file = File::create(&path).expect("cascades.csv の作成に失敗");
-    let mut wtr = Writer::from_writer(BufWriter::new(file));
-    for row in rows {
-        wtr.serialize(row).expect("カスケード行の書き込みに失敗");
-    }
-    wtr.flush().expect("フラッシュに失敗");
+    socsim_results::write_csv(rows, &path).expect("cascades.csv の書き込みに失敗");
 }
 
 /// `llm_meta.json` の構造体 (LLM モデル・endpoint・温度・seed・cache 統計)．
@@ -326,15 +320,19 @@ pub fn save_llm_meta(result: &SimulationResult, cfg: &Config, output_dir: &str) 
                            mechanism. The socsim core (BA network, activation, recommender, \
                            info propagation, metrics) is deterministic given the seed.",
     };
+    // pretty-print JSON の書き出しは socsim_results::write_json に委譲する
+    // (内部は serde_json::to_writer_pretty + flush; 従来の writer とバイト等価)．
+    // provider/model/endpoint/temperature/seed の値は従来どおり result / cfg から
+    // 採り，LlmMetaJson の構造 (フィールド名・順序・determinism_note) を保持する
+    // (`MetadataCollector::summary()` は cache-hit 100% 再実行や呼び出し 0 件で
+    // endpoint/model が変わりうるため，バイト等価のためここでは使わない)．
     let path = format!("{}/llm_meta.json", output_dir);
-    let file = File::create(&path).expect("llm_meta.json の作成に失敗");
-    serde_json::to_writer_pretty(BufWriter::new(file), &meta)
-        .expect("llm_meta.json の書き込みに失敗");
+    socsim_results::write_json(&meta, &path).expect("llm_meta.json の書き込みに失敗");
 }
 
 /// 出力ディレクトリを作成する．
 pub fn ensure_output_dir(output_dir: &str) {
-    fs::create_dir_all(output_dir).expect("出力ディレクトリの作成に失敗");
+    socsim_results::ensure_dir(output_dir).expect("出力ディレクトリの作成に失敗");
 }
 
 #[cfg(test)]
