@@ -38,7 +38,18 @@ uv run oasis-tools show-experiment-settings --results-dir results/latest
 
 ## `reproduce`
 
-`run` / `sweep` で論文 Finding を再現するための案内を表示する Phase 3 スタブ．
+`oasis reproduce` が書き出す `reproduce_summary.json` と条件別 `metrics_<recsys>.csv` を読み，RecSys アブレーション行列と PASS/off アンカー表を表示し，`{results_dir}/figures/` に 3 つの図を描く:
+
+- `recsys_diffusion.png` — 推薦器別の最終 伝播到達・最大カスケード規模・幅 (情報拡散)．
+- `polarization_crowd.png` — 推薦器別の最終 極化指数 `P`・極化増分・群衆追随率．
+- `cascade_timeseries.png` — 代表 run の最大カスケード規模・伝播到達の時系列 (推薦器別)．
+
+`--run` を付けると先に Rust バイナリを呼ぶ．`--mock` (および任意で `--quick`) を付ければオフラインで完結する．`--json` でサマリを出力する．
+
+```bash
+uv run oasis-tools reproduce --run --mock          # 再現 + レポート + 図 (オフライン)
+uv run oasis-tools reproduce                        # 既存の results/latest を可視化
+```
 
 ## 出力の読み方
 

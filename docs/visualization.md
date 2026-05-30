@@ -38,7 +38,18 @@ uv run oasis-tools show-experiment-settings --results-dir results/latest
 
 ## `reproduce`
 
-A Phase-3 stub that prints guidance for reproducing the paper's findings with `run` / `sweep`.
+Reads the `reproduce_summary.json` and per-condition `metrics_<recsys>.csv` written by `oasis reproduce`, prints the RecSys-ablation matrix and the PASS/off anchor table, and draws three figures into `{results_dir}/figures/`:
+
+- `recsys_diffusion.png` — final propagation reach, max cascade size, and breadth per recommender (information diffusion).
+- `polarization_crowd.png` — final polarization index `P`, polarization gain, and herd-following rate per recommender.
+- `cascade_timeseries.png` — the representative run's max-cascade-size and reach over time, per recommender.
+
+`--run` first invokes the Rust binary; add `--mock` (and optionally `--quick`) to stay offline. `--json` dumps the summary.
+
+```bash
+uv run oasis-tools reproduce --run --mock          # reproduce + report + figures, offline
+uv run oasis-tools reproduce                        # visualize an existing results/latest
+```
 
 ## Interpreting the outputs
 

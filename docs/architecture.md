@@ -18,7 +18,8 @@ yang2024/
 │   │   ├── parse.rs            # ACTION/TARGET/CONTENT parsing
 │   │   ├── mechanisms.rs       # the 6 mechanisms (one per phase)
 │   │   ├── llm.rs              # Ollama→OpenAI fallback + cache (socsim-llm)
-│   │   ├── simulation.rs       # init_world + run driver + output writers
+│   │   ├── reproduce_mock.rs   # offline scripted client for reproduce/run --mock
+│   │   ├── simulation.rs       # init_world + run / run_mock driver + output writers
 │   │   └── metrics.rs          # polarization, cascade, reach, herd
 │   ├── examples/mock_smoke.rs  # offline (no live LLM) smoke
 │   └── tests/integration_test.rs

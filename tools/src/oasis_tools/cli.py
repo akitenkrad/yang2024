@@ -36,7 +36,7 @@ main = build_dispatcher(
             "oasis_tools.show_experiment_settings:main",
         ),
         "reproduce": (
-            "論文 Finding の一括再現 (Phase 3; 未実装スタブ)",
+            "論文の創発現象 (情報拡散 / 極化 / 群衆効果) + RecSys アブレーションの一括再現 + 図",
             "oasis_tools.reproduce_paper:main",
         ),
     },

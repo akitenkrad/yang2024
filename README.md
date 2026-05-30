@@ -59,13 +59,20 @@ cargo run --release -- run --n-leaders 0 --n-agents 40 --timesteps 10 --seed 42
 ## Documentation
 
 - [Use cases](docs/usecases.md) — what you can do with this project, with pointers to the rest of the docs.
-- [CLI](docs/cli.md) — the Rust CLI: the `run` and `sweep` subcommands and their flags, plus the LLM environment variables.
+- [CLI](docs/cli.md) — the Rust CLI: the `run`, `sweep`, and `reproduce` subcommands and their flags, plus the LLM environment variables.
 - [Visualization](docs/visualization.md) — the Python `oasis-tools` and how to interpret the outputs.
 - [Architecture](docs/architecture.md) — repository structure, the dynamic follow-graph, the two-layer determinism, the socsim/`socsim-llm` framework, the six mechanisms, the metrics, and references.
 
 ## Scope
 
-This repository currently implements **Phase 1** (the core dynamic-network model: Time-Engine activation, the deterministic recommender, the LLM-confined leader action mechanism with Ollama→OpenAI fallback + caching, the info-propagation mechanism, the `run` subcommand, and the metrics) and **Phase 2** (the `sweep` over agent count × activation rate, plus the Python `visualize` / `visualize-sweep` / `show-experiment-settings` tools). A one-shot paper reproduction (`reproduce`: information diffusion / polarization / herd effect / RecSys ablation in one go) and scaling to thousands of agents are left as future work (Phase 3); clean extension points are kept throughout.
+The repository provides:
+
+- **`run`** — the core dynamic-network model: Time-Engine activation, the deterministic recommender (interest-match / hot-score / ablation), the LLM-confined leader action mechanism (Ollama→OpenAI fallback + prompt caching), info propagation along the follow graph, and the metrics.
+- **`sweep`** — a sensitivity scan over agent count × activation rate.
+- **`reproduce`** — a one-shot reproduction of OASIS's headline emergent phenomena (information-diffusion cascades, group polarization, and crowd / herd effects) contrasted across a RecSys ablation (interest / hot-score / none), with a `--mock` deterministic scripted client so it runs fully offline and bit-deterministically. It scores the observed metrics against the paper's qualitative findings and emits `reproduce_summary.json` plus figures.
+- **Python `oasis-tools`** — `visualize`, `visualize-sweep`, `show-experiment-settings`, and `reproduce` (report + figures).
+
+The paper's million-agent scale is not run here: the implementation documents the scaling path (activation subsampling, two-tier detail with leaders-only LLM, prompt caching, `--llm-budget`) and defaults to a small `N`. Faithfulness is qualitative — local llama3.2 is not the paper's GPT-3.5/4, so the goal is the *trend* (multi-hop cascades, emergent polarization, recommender-shaped diffusion), not exact values.
 
 ## License
 

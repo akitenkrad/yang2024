@@ -59,13 +59,20 @@ cargo run --release -- run --n-leaders 0 --n-agents 40 --timesteps 10 --seed 42
 ## ドキュメント
 
 - [ユースケース](docs/usecases.ja.md) — 本プロジェクトでできること，および他ドキュメントへの案内．
-- [CLI](docs/cli.ja.md) — Rust CLI: `run` / `sweep` サブコマンドとフラグ，LLM 環境変数．
+- [CLI](docs/cli.ja.md) — Rust CLI: `run` / `sweep` / `reproduce` サブコマンドとフラグ，LLM 環境変数．
 - [可視化](docs/visualization.ja.md) — Python `oasis-tools` と出力の読み方．
 - [アーキテクチャ](docs/architecture.ja.md) — リポジトリ構成・動的フォローグラフ・二層決定論・socsim/`socsim-llm` 基盤・6 メカニズム・指標・参考文献．
 
 ## 対応範囲
 
-本リポジトリは現状 **Phase 1** (コア動的ネットワークモデル: Time-Engine 活性化・決定論的推薦器・LLM を閉じ込めたリーダー行動メカニズム (Ollama→OpenAI フォールバック + キャッシュ)・情報伝播メカニズム・`run` サブコマンド・指標) と **Phase 2** (エージェント数 × 活性化率の `sweep`，Python `visualize` / `visualize-sweep` / `show-experiment-settings` ツール) を実装している．論文 Finding の一括再現 (`reproduce`: 情報拡散 / 極化 / 群衆効果 / RecSys アブレーション) と数千規模へのスケーリングは Phase 3 の課題として残置し，随所に拡張点を設けている．
+本リポジトリは以下を提供する:
+
+- **`run`** — コア動的ネットワークモデル: Time-Engine 活性化・決定論的推薦器 (興味マッチ / ホットスコア / アブレーション)・LLM を閉じ込めたリーダー行動メカニズム (Ollama→OpenAI フォールバック + プロンプトキャッシュ)・フォローグラフ上の情報伝播・指標．
+- **`sweep`** — エージェント数 × 活性化率の感度分析．
+- **`reproduce`** — OASIS の見出し的な創発現象 (情報拡散カスケード・グループ極化・群衆 / 群れ効果) を RecSys アブレーション (interest / hot-score / none) で対比した一括再現．`--mock` 決定論的 scripted クライアントにより完全オフライン・bit 決定論的に動く．観測値を論文の定性的知見と突き合わせ採点し，`reproduce_summary.json` と図を出力する．
+- **Python `oasis-tools`** — `visualize` / `visualize-sweep` / `show-experiment-settings` / `reproduce` (レポート + 図)．
+
+論文の 100 万エージェント規模はここでは実行しない: 実装はスケール経路 (活性化サブサンプリング・リーダーのみ LLM の二層詳細度・プロンプトキャッシュ・`--llm-budget`) を文書化し，既定は小規模 `N` とする．再現忠実度は定性的である — ローカル llama3.2 は論文の GPT-3.5/4 ではないため，目標は傾向 (多段カスケード・創発する極化・推薦器が形作る拡散) であり，絶対値一致ではない．
 
 ## ライセンス
 

@@ -11,7 +11,7 @@
 use oasis_simulation::config::{Config, LlmSettings, Platform, RecSysConfig, RecSysKind};
 use oasis_simulation::llm::{wrap_client, OasisClient};
 use oasis_simulation::recsys::{build_feed, hot_score};
-use oasis_simulation::simulation::{init_world, run_with_client, select_leaders};
+use oasis_simulation::simulation::{init_world, run_mock, run_with_client, select_leaders};
 use oasis_simulation::world::{AgentProfile, OasisWorld, Post, ACTIVITY_DIM};
 
 use socsim_core::{derive_seed, AgentId, SimRng};
@@ -229,4 +229,116 @@ fn interest_feed_is_deterministic_and_excludes_self() {
     let f2 = build_feed(&world, AgentId(0), &p);
     assert_eq!(f1, f2);
     assert!(!f1.contains(&1), "自分の投稿は除外されるべき");
+}
+
+// --------------------------------------------------------------------------- //
+// reproduce mock: 創発現象 (情報拡散 / 極化 / 群衆効果) がオフラインで再現される
+// --------------------------------------------------------------------------- //
+
+/// reproduce が使う «周辺エージェント多数» の構図を持つ設定 (推薦器が露出をゲート)．
+fn repro_config(kind: RecSysKind) -> Config {
+    Config {
+        platform: Platform::X,
+        n_agents: 80,
+        n_leaders: 8,
+        timesteps: 16,
+        activation_rate: 0.8,
+        llm_budget: 5000,
+        ba_m: 4,
+        recsys: RecSysConfig {
+            kind,
+            ..RecSysConfig::default()
+        },
+        convergence_patience: 100, // 早期停止させない
+        seed: Some(42),
+        llm: LlmSettings::default(),
+        output_dir: "results".to_string(),
+    }
+}
+
+#[test]
+fn reproduce_mock_runs_offline_and_shows_diffusion() {
+    // run_mock はライブ LLM 無しで完結し，多段カスケード (情報拡散) を生む．
+    let result = run_mock(&repro_config(RecSysKind::Interest)).unwrap();
+    let last = result.metrics_history.last().unwrap();
+    assert!(
+        last.cascade_size_max > 1,
+        "情報拡散: 最大カスケード規模 {} は 1 を超えるべき",
+        last.cascade_size_max
+    );
+    assert!(
+        last.propagation_reach >= 2,
+        "情報拡散: 到達は 2 以上であるべき"
+    );
+    assert!(
+        last.polarization_index > 0.0,
+        "極化: 最終 P {} は正であるべき",
+        last.polarization_index
+    );
+    assert!(
+        (0.0..=1.0).contains(&last.herd_disagree_rate),
+        "群衆効果: 追随率は [0,1] にあるべき"
+    );
+}
+
+#[test]
+fn reproduce_mock_is_bit_deterministic() {
+    // 同一 seed + 同一 mock → 完全再現 (socsim コア層の bit 決定論)．
+    let a = run_mock(&repro_config(RecSysKind::HotScore)).unwrap();
+    let b = run_mock(&repro_config(RecSysKind::HotScore)).unwrap();
+    let ac: Vec<usize> = a
+        .metrics_history
+        .iter()
+        .map(|m| m.cascade_size_max)
+        .collect();
+    let bc: Vec<usize> = b
+        .metrics_history
+        .iter()
+        .map(|m| m.cascade_size_max)
+        .collect();
+    let ap: Vec<f64> = a
+        .metrics_history
+        .iter()
+        .map(|m| m.polarization_index)
+        .collect();
+    let bp: Vec<f64> = b
+        .metrics_history
+        .iter()
+        .map(|m| m.polarization_index)
+        .collect();
+    assert_eq!(ac, bc, "mock は最大カスケード規模を bit 再現すべき");
+    assert_eq!(ap, bp, "mock は極化指数を bit 再現すべき");
+    assert_eq!(a.final_step, b.final_step);
+}
+
+#[test]
+fn reproduce_mock_recsys_shapes_diffusion() {
+    // RecSys アブレーション: グローバル人気で全員に最ホット投稿を見せる hot-score は，
+    // フォロー先ローカルの最新のみを見せる none より大きなカスケードを生む
+    // (= 推薦器が増幅 = 拡散を形作る; 論文の RecSys 知見)．mock を平均で安定化する．
+    let mut hot_total = 0usize;
+    let mut none_total = 0usize;
+    for run_idx in 0..3u64 {
+        let seed = derive_seed(42, &[run_idx]);
+        let mut hot = repro_config(RecSysKind::HotScore);
+        hot.seed = Some(seed);
+        let mut none = repro_config(RecSysKind::None);
+        none.seed = Some(seed);
+        hot_total += run_mock(&hot)
+            .unwrap()
+            .metrics_history
+            .last()
+            .unwrap()
+            .cascade_size_max;
+        none_total += run_mock(&none)
+            .unwrap()
+            .metrics_history
+            .last()
+            .unwrap()
+            .cascade_size_max;
+    }
+    assert!(
+        hot_total >= none_total,
+        "hot-score 累積カスケード {hot_total} は none 累積 {none_total} 以上であるべき (推薦器が拡散を増幅)"
+    );
 }

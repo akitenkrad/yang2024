@@ -18,7 +18,8 @@ yang2024/
 │   │   ├── parse.rs            # ACTION/TARGET/CONTENT パース
 │   │   ├── mechanisms.rs       # 6 メカニズム (1 フェーズに 1 つ)
 │   │   ├── llm.rs              # Ollama→OpenAI フォールバック + キャッシュ (socsim-llm)
-│   │   ├── simulation.rs       # init_world + run ドライバ + 出力 writer
+│   │   ├── reproduce_mock.rs   # reproduce/run --mock 用オフライン scripted クライアント
+│   │   ├── simulation.rs       # init_world + run / run_mock ドライバ + 出力 writer
 │   │   └── metrics.rs          # 極化・カスケード・到達・群衆
 │   ├── examples/mock_smoke.rs  # オフライン (ライブ LLM 不要) スモーク
 │   └── tests/integration_test.rs
