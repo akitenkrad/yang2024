@@ -32,6 +32,10 @@ use oasis_simulation::simulation::{
     about = "Yang et al. (2024) OASIS: Open Agent Social Interaction Simulations — 再現実験"
 )]
 struct Cli {
+    /// Ollama 接続先 URL（指定時は環境変数 OLLAMA_HOST を上書きする）．
+    #[arg(long, global = true)]
+    ollama_host: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -975,6 +979,9 @@ fn cmd_reproduce(args: ReproduceArgs) {
 
 fn main() {
     let cli = Cli::parse();
+    if let Some(host) = cli.ollama_host.as_deref() {
+        std::env::set_var("OLLAMA_HOST", host);
+    }
     match cli.command {
         Commands::Run(args) => cmd_run(args),
         Commands::Sweep(args) => cmd_sweep(args),
