@@ -48,7 +48,6 @@ fn base_config() -> Config {
         convergence_patience: 100, // 収束で止めない
         seed: Some(7),
         llm: LlmSettings::default(),
-        output_dir: "results".to_string(),
     }
 }
 
@@ -252,7 +251,6 @@ fn repro_config(kind: RecSysKind) -> Config {
         convergence_patience: 100, // 早期停止させない
         seed: Some(42),
         llm: LlmSettings::default(),
-        output_dir: "results".to_string(),
     }
 }
 

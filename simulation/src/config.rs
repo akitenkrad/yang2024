@@ -160,8 +160,6 @@ pub struct Config {
     pub seed: Option<u64>,
     /// LLM レイヤ設定．
     pub llm: LlmSettings,
-    /// 結果出力ディレクトリ．
-    pub output_dir: String,
 }
 
 impl Default for Config {
@@ -179,7 +177,6 @@ impl Default for Config {
             convergence_patience: 3,
             seed: Some(42),
             llm: LlmSettings::default(),
-            output_dir: "results".to_string(),
         }
     }
 }
@@ -187,7 +184,6 @@ impl Default for Config {
 /// `config.json` (run 用) のシリアライズ表現．
 #[derive(Serialize)]
 pub struct RunConfigJson {
-    pub command: &'static str,
     pub platform: String,
     pub n_agents: usize,
     pub n_leaders: usize,
@@ -199,17 +195,22 @@ pub struct RunConfigJson {
     pub k_in: usize,
     pub k_out: usize,
     pub convergence_patience: usize,
-    pub seed: Option<u64>,
+    /// 実体化した乱数シード．`--seed` 省略時にランダムに引いた値もここに入る
+    /// (`seed_pointers` が指すのはこの値で，どのシードで回ったのかを必ず残す)．
+    pub seed: u64,
     pub llm_temperature: f32,
     pub llm_seed: u64,
-    pub output_dir: String,
+    /// scripted mock で駆動したか．live とは結果が別物になるので条件として残す．
+    pub mock: bool,
 }
 
 impl Config {
-    /// `config.json` 用の表現を組み立てる．
-    pub fn to_run_config_json(&self) -> RunConfigJson {
+    /// runvault の `parameters` 用の表現を組み立てる．
+    ///
+    /// `seed` には実体化したシードを渡す — `Config::seed` は `--seed` 省略時に
+    /// `None` のままなので，そのまま書くとどのシードで回ったのかが記録に残らない．
+    pub fn to_run_config_json(&self, seed: u64, mock: bool) -> RunConfigJson {
         RunConfigJson {
-            command: "run",
             platform: self.platform.label().to_string(),
             n_agents: self.n_agents,
             n_leaders: self.n_leaders,
@@ -221,10 +222,10 @@ impl Config {
             k_in: self.recsys.k_in,
             k_out: self.recsys.k_out,
             convergence_patience: self.convergence_patience,
-            seed: self.seed,
+            seed,
             llm_temperature: self.llm.temperature,
             llm_seed: self.llm.seed,
-            output_dir: self.output_dir.clone(),
+            mock,
         }
     }
 }

@@ -58,7 +58,9 @@ yang2024/
 
 ## 出力
 
-`results/{YYYYMMDD_HHMMSS}/` (`latest` シンボリックリンク付き): `config.json`，`metrics.csv` (long-format `t,metric,value`)，`cascades.csv`，`llm_meta.json` (provider/model/temp/seed/cache-hit)，sweep では `sweep_summary.csv` + `sweep_config.json`．
+出力の置き場と同一性は [runvault](https://github.com/akitenkrad/rs-runvault) が持つ．サブコマンド 1 回が run 1 本で，run ディレクトリが出力先そのものなので，タイムスタンプ付きサブディレクトリも `latest` シンボリックリンクも作らない．
+
+`results/oasis/<subcommand>_<時刻>_<cfg8>_<exec4>/` に `run.json` (git commit / 環境 / LLM / 論文情報)・`config.json` (封筒; 条件は `parameters` の下)・`metrics.csv` (long 形式 `run_uid, step, step_unit, scope, name, value`)・`events.jsonl`・`status.json`・`manifest.csv` が並ぶ．カスケード表は `events.jsonl` の `x.yang2024.cascade` 行 (時間軸を持たない «1 本 1 行» なので `metrics.csv` には置けない)，LLM のモデル・provider・温度は `run.json` の `llm` ブロックにある．sweep は親 run + 条件ごとの子 run (`sweep-point`) で，試行 1 本ごとの最終値は子の `terminal` イベントである．詳細は [CLI リファレンス](cli.ja.md) を参照．
 
 ## 参考文献
 

@@ -3,24 +3,31 @@
 //!
 //! `run`       : 単一設定で BA フォローグラフ上の LLM 駆動 行動選択 + 推薦 + 情報
 //!               伝播を実行する．
-//! `sweep`     : エージェント数 × 活性化率 を走査し，最終集団指標を
-//!               `sweep_summary.csv` に集計する．
+//! `sweep`     : エージェント数 × 活性化率 を走査する．親 run 1 本と，条件 1 点ごとの
+//!               子 run (`sweep-point`) に分ける．
 //! `reproduce` : 論文の創発現象 (情報拡散カスケード / グループ極化 / 群衆効果) を
 //!               RecSys アブレーション (interest / hot-score / none) で対比し，
-//!               観測 vs 論文の PASS/off を `reproduce_summary.json` に集計する．
+//!               観測 vs 論文の PASS/off を判定する．
+//!
+//! 出力の置き場と同一性は runvault が持つ．タイムスタンプ付きディレクトリも
+//! `latest` シンボリックリンクもこちらでは作らず，`Run::start` が決めた run
+//! ディレクトリへ書く．
 
 use std::fs;
 use std::path::Path;
 
 use clap::{Parser, Subcommand};
-use socsim_results::{refresh_latest_symlink, timestamp, write_csv, write_json};
+use runvault::{Lineage, Run, RunOptions};
+use serde::Serialize;
 
 use oasis_simulation::config::{
     parse_platform, parse_recsys, Config, LlmSettings, Platform, RecSysConfig, RecSysKind,
 };
-use oasis_simulation::simulation::{
-    ensure_output_dir, run, run_mock, save_cascades, save_llm_meta, save_metrics, SimulationResult,
-};
+use oasis_simulation::llm::{build_live_client, OasisClient};
+use oasis_simulation::metrics::StepMetrics;
+use oasis_simulation::record::{self, ANCHOR_EVENT, DOMAIN, EXPERIMENT, REPO_ID};
+use oasis_simulation::reproduce_mock::build_reproduce_client;
+use oasis_simulation::simulation::{run_with_client, SimulationResult};
 
 // ---------------------------------------------------------------------------
 // CLI 定義
@@ -261,48 +268,77 @@ struct ReproduceArgs {
 // 補助
 // ---------------------------------------------------------------------------
 
-/// `sweep_summary.csv` の 1 行．
-#[derive(serde::Serialize)]
-struct SweepRow {
-    platform: String,
-    recsys: String,
-    n_agents: usize,
-    activation_rate: f64,
-    run: usize,
-    seed: u64,
-    converged: bool,
-    final_step: usize,
-    final_polarization_index: f64,
-    final_opinion_std: f64,
-    final_propagation_reach: usize,
-    final_cascade_size_max: usize,
-    cache_hit_rate: f64,
-}
-
-/// `sweep_config.json` の構造体．
-#[derive(serde::Serialize)]
-struct SweepConfigJson {
-    command: &'static str,
+/// スイープ親 run の実験条件 (グリッド定義そのもの)．
+#[derive(Serialize)]
+struct SweepParameters {
     platform: String,
     recsys: String,
     n_agents_values: Vec<usize>,
     activation_rate_values: Vec<f64>,
     n_leaders: usize,
     timesteps: usize,
+    llm_budget: usize,
+    ba_m: usize,
     runs: usize,
     seed: u64,
     llm_temperature: f32,
     llm_seed: u64,
 }
 
-/// 派生シードのラベルに使う文字列ハッシュ (explicit identity)．
-fn label_hash(label: &str) -> u64 {
-    let mut h: u64 = 0xcbf29ce484222325;
-    for b in label.bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x100000001b3);
+/// スイープの子 run (N × 活性化率の 1 点) の実験条件．
+///
+/// `run` の条件に `runs` が付いた形で，`run` とは別のサブコマンド名を持つ．
+/// 同じ `run` を名乗らせると，「1 本のシミュレーション」と「同一条件の
+/// `runs` 本」という中身の違う 2 つが 1 つの名前に同居し，`runvault path
+/// --subcommand run` がどちらを返すか分からなくなる．
+#[derive(Serialize)]
+struct SweepPointParameters {
+    platform: String,
+    recsys: String,
+    n_agents: usize,
+    activation_rate: f64,
+    n_leaders: usize,
+    timesteps: usize,
+    llm_budget: usize,
+    ba_m: usize,
+    runs: usize,
+    seed: u64,
+    llm_temperature: f32,
+    llm_seed: u64,
+}
+
+/// `reproduce` run の実験条件．
+///
+/// `n_agents` / `runs` / `timesteps` / `n_leaders` は `--quick` を反映した **実際に
+/// 回した値**で，`--quick` そのものは持たない (同じ条件なら同じ config_hash になる)．
+#[derive(Serialize)]
+struct ReproduceParameters {
+    platform: String,
+    recsys_values: Vec<String>,
+    n_agents: usize,
+    n_leaders: usize,
+    timesteps: usize,
+    activation_rate: f64,
+    llm_budget: usize,
+    ba_m: usize,
+    runs: usize,
+    convergence_patience: usize,
+    mock: bool,
+    seed: u64,
+    llm_temperature: f32,
+    llm_seed: u64,
+}
+
+/// このサブコマンドを駆動する LLM クライアントを組む．
+///
+/// `Run::start` の前に呼ぶ．`run.json` の `llm` ブロックに書くモデル名と endpoint は，
+/// 実際に応答するバックエンドから採らないと意味を持たない．
+fn build_client(mock: bool, llm: &LlmSettings) -> OasisClient {
+    if mock {
+        build_reproduce_client()
+    } else {
+        build_live_client(llm).unwrap_or_else(|e| panic!("LLM クライアント構築に失敗: {e}"))
     }
-    h
 }
 
 /// カンマ区切り文字列を trim 済みの非空リストへ．
@@ -356,8 +392,9 @@ fn cmd_run(args: RunArgs) {
     let platform = parse_platform(&args.platform).unwrap_or_else(|e| panic!("{}", e));
     let recsys = build_recsys(platform, &args.recsys, args.k_in, args.k_out);
 
-    let timestamp = timestamp();
-    let output_dir = format!("{}/{}", args.output_dir, timestamp);
+    // シードを実体化してから記録する．--seed 省略時にシミュレーション側で
+    // rand::random に落とすと，実際に使われたシードがどこにも残らない．
+    let seed = args.seed.unwrap_or_else(rand::random::<u64>);
 
     let cfg = Config {
         platform,
@@ -369,7 +406,7 @@ fn cmd_run(args: RunArgs) {
         ba_m: args.ba_m,
         recsys,
         convergence_patience: args.convergence_patience,
-        seed: args.seed,
+        seed: Some(seed),
         llm: LlmSettings {
             temperature: args.temperature,
             seed: args.llm_seed,
@@ -380,7 +417,6 @@ fn cmd_run(args: RunArgs) {
                 Some(args.cache_path.clone())
             },
         },
-        output_dir: output_dir.clone(),
     };
 
     if !args.mock {
@@ -388,7 +424,28 @@ fn cmd_run(args: RunArgs) {
             let _ = fs::create_dir_all(parent);
         }
     }
-    ensure_output_dir(&cfg.output_dir);
+
+    let client = build_client(args.mock, &cfg.llm);
+    let llm = record::llm_block(
+        client.inner().model(),
+        client.inner().endpoint(),
+        cfg.llm.temperature,
+    );
+
+    let parameters = cfg.to_run_config_json(seed, args.mock);
+    let mut rv = Run::start(
+        RunOptions::new(EXPERIMENT, "run")
+            .repo_id(REPO_ID)
+            .domain(DOMAIN)
+            .results_root(&args.output_dir)
+            .parameters(&parameters)
+            .expect("runvault: parameters の組み立てに失敗")
+            .seed_pointers(["/seed"])
+            .master_seed(seed)
+            .llm(llm)
+            .replication(record::replication()),
+    )
+    .expect("runvault: run の開始に失敗");
 
     println!("=== Yang et al. (2024) OASIS LLM ソーシャルメディアシミュレーション 再現実験 ===");
     println!(
@@ -401,35 +458,20 @@ fn cmd_run(args: RunArgs) {
         cfg.activation_rate,
     );
     println!(
-        "seed: {:?} | llm-budget: {} | LLM: temp={} llm_seed={} cache={} | mode={}",
-        cfg.seed,
+        "seed: {} | llm-budget: {} | LLM: temp={} llm_seed={} cache={} | mode={}",
+        seed,
         cfg.llm_budget,
         cfg.llm.temperature,
         cfg.llm.seed,
         args.cache_path,
         if args.mock { "MOCK" } else { "LIVE" },
     );
-    println!("出力先: {}", cfg.output_dir);
+    println!("出力先: {}", rv.dir().display());
     println!("-----------------------------------------------------------------");
 
-    let result = if args.mock {
-        run_mock(&cfg).unwrap_or_else(|e| panic!("mock 実行に失敗: {}", e))
-    } else {
-        run(&cfg).unwrap_or_else(|e| panic!("実行に失敗: {}", e))
-    };
-
-    save_metrics(&result.metrics_history, &cfg.output_dir);
-    save_cascades(&result.cascade_rows, &cfg.output_dir);
-    save_llm_meta(&result, &cfg, &cfg.output_dir);
-
-    // config.json (pretty-print JSON; socsim_results::write_json に委譲)．
-    {
-        let path = format!("{}/config.json", cfg.output_dir);
-        write_json(&cfg.to_run_config_json(), &path).expect("config.json の書き込みに失敗");
-    }
-
-    // latest シンボリックリンクを再作成する (best-effort; 従来同様エラーは無視)．
-    let _ = refresh_latest_symlink(&args.output_dir, &timestamp);
+    let result = run_with_client(&cfg, client).unwrap_or_else(|e| panic!("実行に失敗: {}", e));
+    record::log_simulation(&mut rv, &result);
+    record::log_cascades(&mut rv, &result.cascade_rows);
 
     let last = result.metrics_history.last().unwrap();
     println!(
@@ -448,10 +490,12 @@ fn cmd_run(args: RunArgs) {
         result.metadata.cache_hit_rate() * 100.0,
         result.llm_model,
     );
-    println!("メトリクス → {}/metrics.csv", cfg.output_dir);
-    println!("カスケード → {}/cascades.csv", cfg.output_dir);
-    println!("LLM メタ   → {}/llm_meta.json", cfg.output_dir);
-    println!("設定       → {}/config.json", cfg.output_dir);
+
+    let dir = rv.finish().expect("runvault: run の完了に失敗");
+    println!("メトリクス → {}/metrics.csv", dir.display());
+    println!("カスケード → {}/events.jsonl", dir.display());
+    println!("設定       → {}/config.json", dir.display());
+    println!("LLM メタ   → {}/run.json (llm ブロック)", dir.display());
 }
 
 // ---------------------------------------------------------------------------
@@ -478,14 +522,66 @@ fn cmd_sweep(args: SweepArgs) {
         args.activation_rate_step,
     );
 
-    let timestamp = timestamp();
-    let sweep_dir = format!("{}/{}_sweep", args.output_dir, timestamp);
-    fs::create_dir_all(&sweep_dir).expect("sweep ディレクトリの作成に失敗");
     if let Some(parent) = Path::new(&args.cache_path).parent() {
         let _ = fs::create_dir_all(parent);
     }
 
     let n_total = n_agents_values.len() * activation_rate_values.len() * args.runs;
+
+    let llm_settings = LlmSettings {
+        temperature: args.temperature,
+        seed: args.llm_seed,
+        cache_path: Some(args.cache_path.clone()),
+    };
+    // 全条件が同じバックエンドを使うので，`llm` ブロックは 1 度組んで子 run へ配る．
+    // 名乗る名前を知っているのはクライアントだけなので，回す前に 1 つ組んで訊く．
+    let llm = {
+        let probe = build_client(false, &llm_settings);
+        record::llm_block(
+            probe.inner().model(),
+            probe.inner().endpoint(),
+            llm_settings.temperature,
+        )
+    };
+
+    let sweep_parameters = SweepParameters {
+        platform: platform.label().to_string(),
+        recsys: recsys_kind.label().to_string(),
+        n_agents_values: n_agents_values.clone(),
+        activation_rate_values: activation_rate_values.clone(),
+        n_leaders: args.n_leaders,
+        timesteps: args.timesteps,
+        llm_budget: args.llm_budget,
+        ba_m: args.ba_m,
+        runs: args.runs,
+        seed: args.seed,
+        llm_temperature: args.temperature,
+        llm_seed: args.llm_seed,
+    };
+
+    // 親 run: グリッド定義そのものを parameters に持つ．個別条件の指標は書かない．
+    // 親は 1 本のシミュレーションではないので master_seed を名乗らず，基点シードは
+    // /parameters.seed と seed_pointers 経由で execution_hash に残る．
+    // sweep_id は runvault が親の run_slug で埋める．
+    let parent = Run::start(
+        RunOptions::new(EXPERIMENT, "sweep")
+            .repo_id(REPO_ID)
+            .domain(DOMAIN)
+            .results_root(&args.output_dir)
+            .parameters(&sweep_parameters)
+            .expect("runvault: sweep の parameters の組み立てに失敗")
+            .seed_pointers(["/seed"])
+            .sweep_parent()
+            .llm(llm.clone())
+            .replication(record::replication()),
+    )
+    .expect("runvault: sweep 親 run の開始に失敗");
+
+    let sweep_id = parent
+        .sweep_id()
+        .expect("runvault: sweep 親に sweep_id がありません")
+        .to_string();
+    let parent_run_uid = parent.run_uid().to_string();
 
     println!("=== Yang et al. (2024) OASIS パラメータスイープ (N × activation) ===");
     println!(
@@ -497,23 +593,65 @@ fn cmd_sweep(args: SweepArgs) {
         args.runs,
         n_total,
     );
-    println!("出力先: {}", sweep_dir);
+    println!("シード (base): {}", args.seed);
+    println!("出力先: {}", parent.dir().display());
     println!("-----------------------------------------------------------------");
 
-    let mut summary_rows: Vec<SweepRow> = Vec::with_capacity(n_total);
+    // エージェント数別の平均極化指数 (最後に出す要約)．試行ごとの値は子 run の
+    // events.jsonl が正本なので，ここでは表示のためだけに積む．
+    let mut polarization_by_n: Vec<(usize, Vec<f64>)> =
+        n_agents_values.iter().map(|&n| (n, Vec::new())).collect();
     let mut done = 0usize;
 
     for &n_agents in &n_agents_values {
         for &activation_rate in &activation_rate_values {
+            let params = SweepPointParameters {
+                platform: platform.label().to_string(),
+                recsys: recsys_kind.label().to_string(),
+                n_agents,
+                activation_rate,
+                n_leaders: args.n_leaders.min(n_agents),
+                timesteps: args.timesteps,
+                llm_budget: args.llm_budget,
+                ba_m: args.ba_m,
+                runs: args.runs,
+                seed: args.seed,
+                llm_temperature: args.temperature,
+                llm_seed: args.llm_seed,
+            };
+
+            // 子は «その条件の試行群» そのもの．master_seed は親と同じ基点で，
+            // 条件が違えば config_hash が違うので run としては別物になる．
+            // 同じ条件の繰り返しは無いので replicate_index は 0．
+            let mut child = Run::start(
+                RunOptions::new(EXPERIMENT, "sweep-point")
+                    .repo_id(REPO_ID)
+                    .domain(DOMAIN)
+                    .results_root(&args.output_dir)
+                    .parameters(&params)
+                    .expect("runvault: 子 run の parameters の組み立てに失敗")
+                    .seed_pointers(["/seed"])
+                    .master_seed(args.seed)
+                    .replicate_index(0)
+                    .llm(llm.clone())
+                    .lineage(Lineage {
+                        sweep_id: Some(sweep_id.clone()),
+                        parent_run_uid: Some(parent_run_uid.clone()),
+                        ..Default::default()
+                    })
+                    .replication(record::replication()),
+            )
+            .expect("runvault: 子 run の開始に失敗");
+
+            let mut trials: Vec<record::TrialOutcome> = Vec::with_capacity(args.runs);
             for run_idx in 0..args.runs {
-                let seed = socsim_core::derive_seed(
+                // 各 (platform, n_agents, activation_rate, run) に独立なシードを派生させる．
+                let seed = record::sweep_trial_seed(
                     args.seed,
-                    &[
-                        label_hash(platform.label()),
-                        n_agents as u64,
-                        (activation_rate * 1000.0) as u64,
-                        run_idx as u64,
-                    ],
+                    platform.label(),
+                    n_agents,
+                    activation_rate,
+                    run_idx,
                 );
 
                 let cfg = Config {
@@ -530,35 +668,35 @@ fn cmd_sweep(args: SweepArgs) {
                     },
                     convergence_patience: 3,
                     seed: Some(seed),
-                    llm: LlmSettings {
-                        temperature: args.temperature,
-                        seed: args.llm_seed,
-                        cache_path: Some(args.cache_path.clone()),
-                    },
-                    output_dir: sweep_dir.clone(),
+                    llm: llm_settings.clone(),
                 };
 
-                let result = run(&cfg).unwrap_or_else(|e| panic!("実行に失敗: {}", e));
-                let last = result.metrics_history.last().unwrap();
+                let client = build_client(false, &cfg.llm);
+                let result = run_with_client(&cfg, client)
+                    .unwrap_or_else(|e| panic!("実行に失敗: {}", e));
 
-                summary_rows.push(SweepRow {
-                    platform: platform.label().to_string(),
-                    recsys: recsys_kind.label().to_string(),
-                    n_agents,
-                    activation_rate,
-                    run: run_idx,
+                // 旧 sweep_summary.csv の 1 行が terminal 行 1 本に対応する．
+                // metrics.csv に入れると (run_uid, step, scope, name) が重複する．
+                record::log_trial(
+                    &mut child,
+                    &format!("trial-{run_idx}"),
                     seed,
-                    converged: result.converged,
-                    final_step: result.final_step,
-                    final_polarization_index: last.polarization_index,
-                    final_opinion_std: last.opinion_std,
-                    final_propagation_reach: last.propagation_reach,
-                    final_cascade_size_max: last.cascade_size_max,
-                    cache_hit_rate: result.metadata.cache_hit_rate(),
-                });
+                    args.timesteps,
+                    &result,
+                );
+                let outcome = record::TrialOutcome::from_result(&result);
+                if let Some((_, values)) =
+                    polarization_by_n.iter_mut().find(|(n, _)| *n == n_agents)
+                {
+                    values.push(outcome.polarization_index);
+                }
+                trials.push(outcome);
 
                 done += 1;
             }
+            record::log_condition_summary(&mut child, &trials);
+            child.finish().expect("runvault: 子 run の完了に失敗");
+
             println!(
                 "[{}/{}] N={} activation={:.2} 完了 ({} 試行)",
                 done, n_total, n_agents, activation_rate, args.runs,
@@ -566,52 +704,22 @@ fn cmd_sweep(args: SweepArgs) {
         }
     }
 
-    // sweep_summary.csv (各行を serialize; socsim_results::write_csv に委譲)．
-    {
-        let path = format!("{}/sweep_summary.csv", sweep_dir);
-        write_csv(&summary_rows, &path).expect("sweep_summary.csv の書き込みに失敗");
-    }
-
-    // sweep_config.json
-    {
-        let config_json = SweepConfigJson {
-            command: "sweep",
-            platform: platform.label().to_string(),
-            recsys: recsys_kind.label().to_string(),
-            n_agents_values: n_agents_values.clone(),
-            activation_rate_values: activation_rate_values.clone(),
-            n_leaders: args.n_leaders,
-            timesteps: args.timesteps,
-            runs: args.runs,
-            seed: args.seed,
-            llm_temperature: args.temperature,
-            llm_seed: args.llm_seed,
-        };
-        let path = format!("{}/sweep_config.json", sweep_dir);
-        write_json(&config_json, &path).expect("sweep_config.json の書き込みに失敗");
-    }
-
-    let _ = refresh_latest_symlink(&args.output_dir, &format!("{}_sweep", timestamp));
+    let parent_dir = parent.finish().expect("runvault: sweep 親 run の完了に失敗");
 
     println!("=================================================================");
     println!("スイープ完了: {} 実行", n_total);
     println!("-----------------------------------------------------------------");
     println!("エージェント数別の平均 極化指数 P:");
-    for &n_agents in &n_agents_values {
-        let rows: Vec<&SweepRow> = summary_rows
-            .iter()
-            .filter(|r| r.n_agents == n_agents)
-            .collect();
-        if rows.is_empty() {
+    for (n_agents, values) in &polarization_by_n {
+        if values.is_empty() {
             continue;
         }
-        let avg_p =
-            rows.iter().map(|r| r.final_polarization_index).sum::<f64>() / rows.len() as f64;
+        let avg_p = values.iter().sum::<f64>() / values.len() as f64;
         println!("  N={:<6} → P̄ = {:.4}", n_agents, avg_p);
     }
     println!("-----------------------------------------------------------------");
-    println!("サマリ → {}/sweep_summary.csv", sweep_dir);
-    println!("設定   → {}/sweep_config.json", sweep_dir);
+    println!("親 run  → {}", parent_dir.display());
+    println!("試行の値 → 各子 run の events.jsonl (terminal 行)");
 }
 
 // ---------------------------------------------------------------------------
@@ -619,12 +727,12 @@ fn cmd_sweep(args: SweepArgs) {
 // ---------------------------------------------------------------------------
 
 /// 1 推薦器条件を `runs` 回回した集計セル (情報拡散 / 極化 / 群衆効果)．
-#[derive(serde::Serialize, Clone)]
+///
+/// 試行ごとの値ではなく試行平均だけを持つ (旧 `reproduce_summary.json` と同じ粒度)．
+#[derive(Clone)]
 struct ReproCell {
-    /// 条件ラベル (= 推薦器ラベル; summary/CSV のキー)．
+    /// 条件ラベル (= 推薦器ラベル)．指標名の接頭辞にもなる．
     label: String,
-    recsys: String,
-    runs: usize,
     /// 試行平均の最終 伝播到達ユニークノード数 (情報拡散の広さ)．
     mean_propagation_reach: f64,
     /// 試行平均の最終 最大カスケード規模 (情報拡散の深さ)．
@@ -643,19 +751,48 @@ struct ReproCell {
     mean_final_step: f64,
 }
 
-/// 観測値と論文の定性的知見を突き合わせた 1 アンカー．
-#[derive(serde::Serialize)]
+impl ReproCell {
+    /// run スコープ指標として書く値の並び (接頭辞は [`ReproCell::label`])．
+    fn metrics(&self) -> [(&'static str, f64); 8] {
+        [
+            ("mean_propagation_reach", self.mean_propagation_reach),
+            ("mean_cascade_size_max", self.mean_cascade_size_max),
+            ("mean_cascade_max_breadth", self.mean_cascade_max_breadth),
+            ("mean_n_posts", self.mean_n_posts),
+            ("mean_polarization_index", self.mean_polarization_index),
+            ("mean_polarization_gain", self.mean_polarization_gain),
+            ("mean_herd_disagree_rate", self.mean_herd_disagree_rate),
+            ("mean_final_step", self.mean_final_step),
+        ]
+    }
+}
+
+/// 観測値と論文の定性的知見を突き合わせた 1 アンカー (`events.jsonl` へ書く)．
+///
+/// `name` は runvault の指標名にもなるので slug (小文字・数字・`_`・`-`・`.`) に
+/// 収める．旧実装が名前の括弧に書いていた «どういう比較か» は `paper` 欄に移した．
+#[derive(Serialize)]
 struct ReproAnchor {
     name: String,
     paper: String,
     observed: f64,
     target_lo: f64,
-    target_hi: f64,
+    /// 帯の上限．上限なしは `None`．
+    ///
+    /// `f64::INFINITY` は JSON で `null` に潰れ，«上限が無い» と «書き忘れた» が
+    /// 区別できなくなる．最初から `Option` で持つ．
+    target_hi: Option<f64>,
     pass: bool,
 }
 
+/// 1 セルの実行結果 (集計セルと代表 run の履歴)．
+struct ReproCellResult {
+    cell: ReproCell,
+    /// 代表 run (run 0) のステップごとの履歴．
+    representative: Vec<StepMetrics>,
+}
+
 /// 1 推薦器条件を `runs` 回実行して集計セルを作る．
-#[allow(clippy::too_many_arguments)]
 fn run_repro_cell(
     platform: Platform,
     recsys_kind: RecSysKind,
@@ -663,8 +800,7 @@ fn run_repro_cell(
     runs: usize,
     root_seed: u64,
     mock: bool,
-    out_dir: &str,
-) -> ReproCell {
+) -> ReproCellResult {
     let mut reach = 0.0;
     let mut casc_size = 0.0;
     let mut casc_breadth = 0.0;
@@ -673,18 +809,11 @@ fn run_repro_cell(
     let mut polar_gain = 0.0;
     let mut herd = 0.0;
     let mut final_step = 0.0;
-    // 代表 (run 0) のメトリクス履歴を CSV に保存し，Python 側で時系列描画に使う．
-    let mut representative: Option<Vec<oasis_simulation::metrics::StepMetrics>> = None;
+    let mut representative: Vec<StepMetrics> = Vec::new();
 
     for run_idx in 0..runs {
-        let seed = socsim_core::derive_seed(
-            root_seed,
-            &[
-                label_hash(platform.label()),
-                label_hash(recsys_kind.label()),
-                run_idx as u64,
-            ],
-        );
+        let seed =
+            record::repro_trial_seed(root_seed, platform.label(), recsys_kind.label(), run_idx);
         let cfg = Config {
             platform,
             recsys: RecSysConfig {
@@ -694,12 +823,9 @@ fn run_repro_cell(
             seed: Some(seed),
             ..base.clone()
         };
-        let result: SimulationResult = if mock {
-            run_mock(&cfg)
-                .unwrap_or_else(|e| panic!("mock 実行に失敗 ({}): {e}", recsys_kind.label()))
-        } else {
-            run(&cfg).unwrap_or_else(|e| panic!("実行に失敗 ({}): {e}", recsys_kind.label()))
-        };
+        let client = build_client(mock, &cfg.llm);
+        let result: SimulationResult = run_with_client(&cfg, client)
+            .unwrap_or_else(|e| panic!("実行に失敗 ({}): {e}", recsys_kind.label()));
         let first = result.metrics_history.first().unwrap();
         let last = result.metrics_history.last().unwrap();
         reach += last.propagation_reach as f64;
@@ -711,29 +837,24 @@ fn run_repro_cell(
         herd += last.herd_disagree_rate;
         final_step += result.final_step as f64;
         if run_idx == 0 {
-            representative = Some(result.metrics_history.clone());
+            representative = result.metrics_history.clone();
         }
     }
 
     let n = runs.max(1) as f64;
-    if let Some(hist) = representative {
-        let rows: Vec<_> = hist.iter().flat_map(|m| m.to_rows()).collect();
-        let path = format!("{out_dir}/metrics_{}.csv", recsys_kind.label());
-        socsim_results::write_csv(&rows, &path).expect("metrics_<recsys>.csv の書き込みに失敗");
-    }
-
-    ReproCell {
-        label: recsys_kind.label().to_string(),
-        recsys: recsys_kind.label().to_string(),
-        runs,
-        mean_propagation_reach: reach / n,
-        mean_cascade_size_max: casc_size / n,
-        mean_cascade_max_breadth: casc_breadth / n,
-        mean_n_posts: n_posts / n,
-        mean_polarization_index: polar / n,
-        mean_polarization_gain: polar_gain / n,
-        mean_herd_disagree_rate: herd / n,
-        mean_final_step: final_step / n,
+    ReproCellResult {
+        cell: ReproCell {
+            label: recsys_kind.label().to_string(),
+            mean_propagation_reach: reach / n,
+            mean_cascade_size_max: casc_size / n,
+            mean_cascade_max_breadth: casc_breadth / n,
+            mean_n_posts: n_posts / n,
+            mean_polarization_index: polar / n,
+            mean_polarization_gain: polar_gain / n,
+            mean_herd_disagree_rate: herd / n,
+            mean_final_step: final_step / n,
+        },
+        representative,
     }
 }
 
@@ -753,9 +874,6 @@ fn cmd_reproduce(args: ReproduceArgs) {
     let requested_leaders = if args.quick { 8 } else { args.n_leaders };
     let n_leaders = requested_leaders.min(n_agents);
 
-    let ts = timestamp();
-    let out_dir = format!("{}/reproduce_{}", args.output_dir, ts);
-    ensure_output_dir(&out_dir);
     if !args.mock {
         if let Some(parent) = Path::new(&args.cache_path).parent() {
             let _ = fs::create_dir_all(parent);
@@ -787,8 +905,48 @@ fn cmd_reproduce(args: ReproduceArgs) {
                 Some(args.cache_path.clone())
             },
         },
-        output_dir: out_dir.clone(),
     };
+
+    // 名乗る名前を知っているのはクライアントだけなので，回す前に 1 つ組んで訊く．
+    let llm_block = {
+        let probe = build_client(args.mock, &base.llm);
+        record::llm_block(
+            probe.inner().model(),
+            probe.inner().endpoint(),
+            base.llm.temperature,
+        )
+    };
+
+    let parameters = ReproduceParameters {
+        platform: platform.label().to_string(),
+        recsys_values: recsys_kinds.iter().map(|k| k.label().to_string()).collect(),
+        n_agents,
+        n_leaders,
+        timesteps,
+        activation_rate: args.activation_rate,
+        llm_budget: args.llm_budget,
+        ba_m: args.ba_m,
+        runs,
+        convergence_patience: base.convergence_patience,
+        mock: args.mock,
+        seed: args.seed,
+        llm_temperature: args.temperature,
+        llm_seed: args.llm_seed,
+    };
+
+    let mut rv = Run::start(
+        RunOptions::new(EXPERIMENT, "reproduce")
+            .repo_id(REPO_ID)
+            .domain(DOMAIN)
+            .results_root(&args.output_dir)
+            .parameters(&parameters)
+            .expect("runvault: parameters の組み立てに失敗")
+            .seed_pointers(["/seed"])
+            .master_seed(args.seed)
+            .llm(llm_block)
+            .replication(record::replication()),
+    )
+    .expect("runvault: run の開始に失敗");
 
     println!("=== Yang et al. (2024) OASIS 創発現象 一括再現 ===");
     println!(
@@ -801,14 +959,18 @@ fn cmd_reproduce(args: ReproduceArgs) {
         runs,
         if args.mock { "MOCK" } else { "LIVE" },
     );
-    println!("出力先: {out_dir}");
+    println!("出力先: {}", rv.dir().display());
     println!("-------------------------------------------------");
 
     // --- RecSys アブレーション行列 (interest / hot-score / none) ---
     let mut cells: Vec<ReproCell> = Vec::new();
     for &kind in &recsys_kinds {
-        let cell = run_repro_cell(platform, kind, &base, runs, args.seed, args.mock, &out_dir);
-        cells.push(cell);
+        let out = run_repro_cell(platform, kind, &base, runs, args.seed, args.mock);
+        // 3 条件が 1 本の run に同居するので，(step, scope, name) が衝突しないよう
+        // 条件ラベルを名前に付ける．
+        record::log_history(&mut rv, Some(&out.cell.label), &out.representative);
+        record::log_prefixed(&mut rv, &out.cell.label, &out.cell.metrics());
+        cells.push(out.cell);
     }
 
     // --- アンカー評価 (論文の定性的知見) ---
@@ -820,14 +982,14 @@ fn cmd_reproduce(args: ReproduceArgs) {
             .unwrap_or_else(|| panic!("セル {label} が見つかりません"))
     };
     let mut anchors: Vec<ReproAnchor> = Vec::new();
-    let mut push = |name: &str, paper: &str, obs: f64, lo: f64, hi: f64| {
+    let mut push = |name: &str, paper: &str, obs: f64, lo: f64, hi: Option<f64>| {
         anchors.push(ReproAnchor {
             name: name.to_string(),
             paper: paper.to_string(),
             observed: obs,
             target_lo: lo,
             target_hi: hi,
-            pass: obs >= lo && obs <= hi,
+            pass: obs >= lo && hi.is_none_or(|h| obs <= h),
         });
     };
 
@@ -843,35 +1005,35 @@ fn cmd_reproduce(args: ReproduceArgs) {
 
     // H1 (情報拡散): 推薦器ありでは種投稿が多段にカスケードする (最大カスケード > 1)．
     push(
-        "diffusion_cascade (max cascade size > 1)",
-        "multi-hop information cascade",
+        "diffusion_cascade",
+        "multi-hop information cascade (max cascade size > 1)",
         recsys_on.mean_cascade_size_max,
         1.0 + 1e-9,
-        f64::INFINITY,
+        None,
     );
     // H2 (情報拡散の広さ): 伝播到達が種投稿数を超えて広がる (reach > leaders 起点)．
     push(
-        "diffusion_reach (reach >= 2)",
-        "information spreads beyond seeds",
+        "diffusion_reach",
+        "information spreads beyond seeds (reach >= 2)",
         recsys_on.mean_propagation_reach,
         2.0,
-        f64::INFINITY,
+        None,
     );
     // H3 (極化): 同調的増幅で集団意見が構造化し極化指数 P > 0 を保つ．
     push(
-        "polarization_present (final P > 0)",
-        "group polarization emerges",
+        "polarization_present",
+        "group polarization emerges (final P > 0)",
         recsys_on.mean_polarization_index,
         1e-6,
-        f64::INFINITY,
+        None,
     );
     // H4 (群衆効果): down-treat 群追随率が観測される (群衆効果代理 >= 0)．
     push(
-        "crowd_effect_observed (herd rate in [0,1])",
-        "herd / crowd following",
+        "crowd_effect_observed",
+        "herd / crowd following (herd rate in [0,1])",
         recsys_on.mean_herd_disagree_rate,
         0.0,
-        1.0 + 1e-9,
+        Some(1.0 + 1e-9),
     );
     // H5 (RecSys アブレーション): 推薦器は拡散を **形作る**．
     //   伝播到達 (= 活性化したノードの一意著者数) は «誰が活性化したか» に支配され
@@ -883,11 +1045,11 @@ fn cmd_reproduce(args: ReproduceArgs) {
         let none_casc = cell("none").mean_cascade_size_max;
         let hot_casc = cell("hot-score").mean_cascade_size_max;
         push(
-            "recsys_shapes_diffusion (cascade(hot-score) - cascade(none) >= 0)",
-            "recommender amplifies cascades",
+            "recsys_shapes_diffusion",
+            "recommender amplifies cascades (cascade(hot-score) - cascade(none) >= 0)",
             hot_casc - none_casc,
             -1e-9,
-            f64::INFINITY,
+            None,
         );
     } else if cells.len() >= 2 {
         // hot-score/none が揃わない場合: 推薦器条件間で最大カスケードに差がある
@@ -901,13 +1063,32 @@ fn cmd_reproduce(args: ReproduceArgs) {
             .map(|c| c.mean_cascade_size_max)
             .fold(f64::MAX, f64::min);
         push(
-            "recsys_shapes_diffusion (cascade range across recsys > 0)",
-            "recommender choice changes diffusion",
+            "recsys_shapes_diffusion",
+            "recommender choice changes diffusion (cascade range across recsys > 0)",
             max_c - min_c,
             1e-9,
-            f64::INFINITY,
+            None,
         );
     }
+
+    // 観測量そのものは run 全体を 1 つの値で表す数なので指標に書く．判定 (PASS/off)
+    // と帯はカテゴリ・自前のアンカーなので events.jsonl へ．
+    let observed: Vec<(&str, f64)> = anchors
+        .iter()
+        .map(|a| (a.name.as_str(), a.observed))
+        .collect();
+    record::log_scoped(&mut rv, &observed);
+    for a in &anchors {
+        record::log_verdict(&mut rv, ANCHOR_EVENT, &a.name, a);
+    }
+    let n_pass = anchors.iter().filter(|a| a.pass).count();
+    record::log_scoped(
+        &mut rv,
+        &[
+            ("anchors_passed", n_pass as f64),
+            ("anchors_total", anchors.len() as f64),
+        ],
+    );
 
     // --- コンソール出力 ---
     println!("--- RecSys アブレーション行列 (拡散 / 極化 / 群衆効果) ---");
@@ -929,13 +1110,12 @@ fn cmd_reproduce(args: ReproduceArgs) {
     }
     println!("--- 論文知見アンカー ---");
     for a in &anchors {
-        let hi = if a.target_hi.is_infinite() {
-            "∞".to_string()
-        } else {
-            format!("{:.3}", a.target_hi)
+        let hi = match a.target_hi {
+            Some(h) => format!("{h:.3}"),
+            None => "∞".to_string(),
         };
         println!(
-            "[{}] {:<48} obs={:.4} target=[{:.3},{}]",
+            "[{}] {:<26} obs={:.4} target=[{:.3},{}]",
             if a.pass { "PASS" } else { "OFF " },
             a.name,
             a.observed,
@@ -943,34 +1123,12 @@ fn cmd_reproduce(args: ReproduceArgs) {
             hi,
         );
     }
-    let n_pass = anchors.iter().filter(|a| a.pass).count();
     println!("-------------------------------------------------");
     println!("{}/{} アンカーが in-band", n_pass, anchors.len());
 
-    // --- reproduce_summary.json ---
-    let summary = serde_json::json!({
-        "timestamp": ts,
-        "mode": if args.mock { "mock" } else { "live" },
-        "config": {
-            "platform": platform.label(),
-            "n_agents": n_agents,
-            "n_leaders": n_leaders,
-            "timesteps": timesteps,
-            "activation_rate": args.activation_rate,
-            "llm_budget": args.llm_budget,
-            "runs": runs,
-            "seed": args.seed,
-        },
-        "recsys_ablation": cells,
-        "anchors": anchors,
-        "n_pass": n_pass,
-        "n_total": anchors.len(),
-    });
-    let path = format!("{out_dir}/reproduce_summary.json");
-    write_json(&summary, &path).expect("reproduce_summary.json の書き込みに失敗");
-    let _ = refresh_latest_symlink(&args.output_dir, &format!("reproduce_{ts}"));
-    println!("サマリ → {path}");
-    println!("条件別メトリクス → {out_dir}/metrics_<recsys>.csv");
+    let dir = rv.finish().expect("runvault: run の完了に失敗");
+    println!("条件別メトリクス → {}/metrics.csv", dir.display());
+    println!("アンカー判定     → {}/events.jsonl", dir.display());
 }
 
 // ---------------------------------------------------------------------------

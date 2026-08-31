@@ -2,43 +2,46 @@
 
 # Visualization
 
-The Python tools live in `tools/` as the `oasis-tools` package (module `oasis_tools`). Install with `uv sync` at the workspace root, then run `uv run oasis-tools <subcommand>`.
+The Python tools live in `tools/` as the `oasis-tools` package (module `oasis_tools`). Install with `uv sync` at the workspace root, then run `uv run oasis-tools <subcommand>`. How a run directory is read lives in the `runvault` package (`runvault.read`) — rather than scanning `results/` and guessing at the newest directory, the tools ask `runvault path`.
+
+Omitting the directory argument resolves the run through `runvault path --latest`, so `runvault` has to be on PATH or the `RUNVAULT` environment variable has to point at the binary. Figures are written outside the run directory (`results/oasis/figures/<run_slug>/`) — `manifest.csv` is settled when the run ends, so a figure added to `artifacts/` afterwards would carry no hash.
 
 ## `visualize`
 
-Reads `metrics.csv` (long-format `t,metric,value`, pivoted internally) and `cascades.csv` from a run directory and writes:
+Reads the run directory's `metrics.csv` (pivoted internally) and the cascade lines of `events.jsonl` (`x.yang2024.cascade`), and writes:
 
 - `metrics_timeseries.png` — four panels: **polarization index P** (group polarization, Finding 2), **active-user count** (Time-Engine check), **propagation reach** (information diffusion via the recommender), and **cascade size / breadth** (Finding 1).
 - `cascade_tree.png` — the largest cascades drawn as root→repost star trees (networkx). Suppress with `--no-graph`.
 
 ```bash
 uv run oasis-tools visualize
-uv run oasis-tools visualize --results_dir results/20260525_103000 --output_dir out
+uv run oasis-tools visualize --results_dir "$(runvault path --experiment oasis --latest --subcommand run)" --output_dir out
 ```
 
 ## `visualize-sweep`
 
-Reads `sweep_summary.csv` and writes heatmaps and line plots over the agent-count × activation-rate grid (the scale-effect view):
+Rebuilds the one-row-per-trial table from the sweep parent's children (`oasis_tools.sweep_summary`) and writes heatmaps and line plots over the agent-count × activation-rate grid (the scale-effect view):
 
 - `sweep_polarization_heatmap.png` — final polarization P.
 - `sweep_reach_heatmap.png` — final propagation reach.
 - `sweep_metrics_vs_n.png` — P / opinion diversity / reach vs N, one line per activation rate.
 
 ```bash
-uv run oasis-tools visualize-sweep --sweep_dir results/latest
+uv run oasis-tools visualize-sweep
+uv run oasis-tools visualize-sweep --sweep_dir "$(runvault path --experiment oasis --latest --subcommand sweep)"
 ```
 
 ## `show-experiment-settings`
 
-Prints the run/sweep configuration (`config.json` / `sweep_config.json`) and, if present, the LLM metadata (`llm_meta.json`: provider, model, endpoint, temperature, seed, cache-hit rate). `--json` emits machine-readable JSON.
+Prints the `parameters` of `config.json` (a run and a sweep parent are told apart by the presence of `n_agents_values`), the `llm` block of `run.json`, and the LLM call breakdown from `metrics.csv`. A pre-migration flat `config.json` / `sweep_config.json` / `llm_meta.json` is still read. `--json` emits machine-readable JSON.
 
 ```bash
-uv run oasis-tools show-experiment-settings --results-dir results/latest
+uv run oasis-tools show-experiment-settings
 ```
 
 ## `reproduce`
 
-Reads the `reproduce_summary.json` and per-condition `metrics_<recsys>.csv` written by `oasis reproduce`, prints the RecSys-ablation matrix and the PASS/off anchor table, and draws three figures into `{results_dir}/figures/`:
+Reads the run directory `oasis reproduce` wrote — the RecSys-ablation matrix from the run-scope metrics of `metrics.csv` (`<recsys>_mean_*`), the PASS/off verdicts from `events.jsonl` (`x.yang2024.anchor`) — prints the matrix and the anchor table, and draws three figures into `results/oasis/figures/<run_slug>/`:
 
 - `recsys_diffusion.png` — final propagation reach, max cascade size, and breadth per recommender (information diffusion).
 - `polarization_crowd.png` — final polarization index `P`, polarization gain, and herd-following rate per recommender.
@@ -48,7 +51,7 @@ Reads the `reproduce_summary.json` and per-condition `metrics_<recsys>.csv` writ
 
 ```bash
 uv run oasis-tools reproduce --run --mock          # reproduce + report + figures, offline
-uv run oasis-tools reproduce                        # visualize an existing results/latest
+uv run oasis-tools reproduce                        # visualize the most recent reproduce run
 ```
 
 ## Interpreting the outputs

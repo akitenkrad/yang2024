@@ -13,7 +13,7 @@ LLM output is **outside** socsim's bit-reproducibility. The design therefore spl
 - **Deterministic socsim core** — BA network generation, Time-Engine activation, the recommender (interest-match / hot-score / ablation), info propagation along the dynamic follow graph, and metrics. Given a seed this reproduces bit-for-bit.
 - **Non-deterministic LLM layer** — the opinion leaders' chain-of-thought action choice. Pseudo-determinised by `socsim-llm`'s `CachingClient` (a `hash(prompt+model)` → response cache), `temperature=0` and a fixed seed. The provider order is **Ollama first → OpenAI fallback** via `socsim-llm`'s `FallbackClient`.
 
-The cache — not the model — is the reproducibility mechanism: a warm cache replays identical responses, so a rerun is free and stable. Each run writes `llm_meta.json` recording the provider, model, endpoint, temperature, seed and cache-hit rate. Because the local default model (`llama3.2:latest`) differs from the paper's GPT models, reproduction targets are **qualitative** (the trend and sign of the curves: cascade growth, rising polarization, scale effects), not the paper's exact numbers.
+The cache — not the model — is the reproducibility mechanism: a warm cache replays identical responses, so a rerun is free and stable. Each run records the provider, model and temperature in the `llm` block of runvault's `run.json`, and the call count and cache-hit rate as run-scope metrics in `metrics.csv`. Because the local default model (`llama3.2:latest`) differs from the paper's GPT models, reproduction targets are **qualitative** (the trend and sign of the curves: cascade growth, rising polarization, scale effects), not the paper's exact numbers.
 
 ## Scalability design
 
@@ -42,7 +42,7 @@ uv sync
 uv run oasis-tools visualize
 
 # Inspect the run's settings and LLM metadata
-uv run oasis-tools show-experiment-settings --results-dir results/latest
+uv run oasis-tools show-experiment-settings
 ```
 
 ### Offline smoke (no live LLM)
@@ -69,7 +69,7 @@ The repository provides:
 
 - **`run`** — the core dynamic-network model: Time-Engine activation, the deterministic recommender (interest-match / hot-score / ablation), the LLM-confined leader action mechanism (Ollama→OpenAI fallback + prompt caching), info propagation along the follow graph, and the metrics.
 - **`sweep`** — a sensitivity scan over agent count × activation rate.
-- **`reproduce`** — a one-shot reproduction of OASIS's headline emergent phenomena (information-diffusion cascades, group polarization, and crowd / herd effects) contrasted across a RecSys ablation (interest / hot-score / none), with a `--mock` deterministic scripted client so it runs fully offline and bit-deterministically. It scores the observed metrics against the paper's qualitative findings and emits `reproduce_summary.json` plus figures.
+- **`reproduce`** — a one-shot reproduction of OASIS's headline emergent phenomena (information-diffusion cascades, group polarization, and crowd / herd effects) contrasted across a RecSys ablation (interest / hot-score / none), with a `--mock` deterministic scripted client so it runs fully offline and bit-deterministically. It scores the observed metrics against the paper's qualitative findings, leaving the verdicts in the run's `events.jsonl` and the per-condition metrics in `metrics.csv`, and draws the figures.
 - **Python `oasis-tools`** — `visualize`, `visualize-sweep`, `show-experiment-settings`, and `reproduce` (report + figures).
 
 The paper's million-agent scale is not run here: the implementation documents the scaling path (activation subsampling, two-tier detail with leaders-only LLM, prompt caching, `--llm-budget`) and defaults to a small `N`. Faithfulness is qualitative — local llama3.2 is not the paper's GPT-3.5/4, so the goal is the *trend* (multi-hop cascades, emergent polarization, recommender-shaped diffusion), not exact values.

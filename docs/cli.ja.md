@@ -37,7 +37,33 @@ LLM レイヤは **Ollama 第一 → OpenAI フォールバック** (`socsim-llm
 | `--temperature` | `0.0` | LLM 温度 |
 | `--llm-seed` | `0` | LLM バックエンド seed |
 | `--cache-path` | `.llm_cache/cache.json` | プロンプト→応答キャッシュ |
-| `--output-dir` | `results` | 出力ベースディレクトリ |
+| `--output-dir` | `results` | runvault の results ルート |
+
+出力は runvault の run ディレクトリへ．run ディレクトリが出力先そのものなので，タイムスタンプ付きサブディレクトリも `latest` symlink も作らない．直近の完了 run のパスは `runvault` に聞く:
+
+```bash
+runvault path --experiment oasis --latest --subcommand run
+```
+
+```
+results/
+└── oasis/                                          ← experiment
+    ├── latest_finished -> run_20260405_153000_...   ← 最後に完了した run
+    ├── run_20260405_153000_9f2c41ab_3b1d/           ← <subcommand>_<時刻>_<cfg8>_<exec4>
+    │   ├── run.json                                 ← メタデータ (git commit / 環境 / LLM / 論文情報)
+    │   ├── config.json                              ← 封筒．実験条件は ["parameters"] の下
+    │   ├── metrics.csv                              ← long 形式 (step / step_unit / scope / name / value)
+    │   ├── events.jsonl                             ← カスケード 1 本 = 1 行 (x.yang2024.cascade)
+    │   ├── status.json                              ← 終了状態と所要時間
+    │   └── manifest.csv                             ← artifacts/ と logs/ のハッシュ
+    └── figures/                                     ← 可視化スクリプトの出力 (run の外)
+        └── run_20260405_153000_9f2c41ab_3b1d/
+            └── metrics_timeseries.png
+```
+
+`metrics.csv` は 1 行 1 値の long 形式．ステップごとの 8 指標 (`polarization_index` / `opinion_std` / `active_user_count` / `propagation_reach` / `cascade_size_max` / `cascade_max_breadth` / `n_posts` / `herd_disagree_rate`) は `step_unit=step` の `step` を持ち，run 全体を 1 つの値で表す `converged` (0.0 / 1.0) / `final_step` / `llm_calls` / `llm_cache_hits` / `llm_cache_hit_rate` は `scope=run` で `step` を持たない．LLM のモデル・provider・温度は `run.json` の `llm` ブロックにある (`llm_meta.json` は書かれない)．
+
+旧 `cascades.csv` は `events.jsonl` の `x.yang2024.cascade` 行になった．カスケード表は時間軸を持たない «1 本 1 行» なので `metrics.csv` には置けない — 全行が同じ主キー (`name`, `step=∅`, `scope`) を名乗ってしまう．
 
 ```bash
 cargo run --release -- run --platform x --n-agents 200 --n-leaders 20 --timesteps 30 \
@@ -49,7 +75,22 @@ cargo run --release -- run --recsys none --n-agents 200 --seed 42
 
 ## `sweep`
 
-エージェント数 × 活性化率を走査し，最終指標を `sweep_summary.csv` に集計する．
+エージェント数 × 活性化率を走査する．親 run 1 本と，条件 1 点ごとの子 run に分けて記録される．子はサブコマンド名 `sweep-point` を名乗り，親の下ではなく experiment ディレクトリの兄弟として並び，`lineage.parent_run_uid` で親を指す．1 行 1 試行のサマリ CSV は書かない (同じ値は子の `events.jsonl` の `terminal` 行にある)．
+
+```
+results/
+└── oasis/
+    ├── sweep_20260405_160827_48d033b7_ee20/         ← 親．parameters が格子の定義
+    │   ├── run.json                                  ← lineage.sweep_id を持つ．rng.master_seed は null
+    │   └── config.json
+    ├── sweep-point_20260405_160828_174916dd_955d/   ← 子 = 1 条件の試行群
+    │   ├── config.json                               ← その条件 (n_agents / activation_rate)
+    │   ├── metrics.csv                               ← 条件の集約 (n_units / n_converged / mean_final_*)
+    │   └── events.jsonl                              ← 試行 1 本 = terminal 行 1 本
+    └── ...
+```
+
+親のパスは `runvault path --experiment oasis --latest --subcommand sweep` で取れる．`oasis-tools visualize-sweep` はこの親を受け取り，子 run の `terminal` 行を集めて従来のサマリ表 (1 行 1 試行) を組み直す．
 
 | フラグ | 既定 | 意味 |
 |--------|------|------|
@@ -62,7 +103,7 @@ cargo run --release -- run --recsys none --n-agents 200 --seed 42
 | `--runs` | `3` | 各条件の独立試行数 |
 | `--seed` | `42` | 基点 seed (各試行は独立に derive) |
 | `--cache-path` | `.llm_cache/cache.json` | 共有キャッシュ (ヒット率向上) |
-| `--output-dir` | `results` | 出力ベースディレクトリ |
+| `--output-dir` | `results` | runvault の results ルート |
 
 ```bash
 cargo run --release -- sweep --n-agents-values 200,1000,5000 \
@@ -72,7 +113,7 @@ cargo run --release -- sweep --n-agents-values 200,1000,5000 \
 
 ## `reproduce`
 
-OASIS の見出し的な創発現象を一括再現する — **情報拡散** (フォローグラフ上のカスケード到達数・最大カスケード規模・幅)，**グループ極化** (極化指数 `P`)，**群衆 / 群れ効果** (down-treat 群追随率) — を **RecSys アブレーション** (interest / hot-score / none) で対比する．各推薦器条件を `--runs` 回独立試行して平均し，論文の定性的知見と突き合わせて PASS/off アンカーとして採点し，`reproduce_summary.json` と条件別 `metrics_<recsys>.csv` を書き出す．Python の `oasis-tools reproduce` がこれらを読み，`recsys_diffusion.png`・`polarization_crowd.png`・`cascade_timeseries.png` を描く．
+OASIS の見出し的な創発現象を一括再現する — **情報拡散** (フォローグラフ上のカスケード到達数・最大カスケード規模・幅)，**グループ極化** (極化指数 `P`)，**群衆 / 群れ効果** (down-treat 群追随率) — を **RecSys アブレーション** (interest / hot-score / none) で対比する．各推薦器条件を `--runs` 回独立試行して平均し，論文の定性的知見と突き合わせて PASS/off アンカーとして採点する．3 つの推薦器条件が 1 本の run に同居するので，条件ごとの代表 run のステップ別系列と試行平均は `<推薦器>_<指標名>` (例 `hot-score_cascade_size_max` / `interest_mean_polarization_index`) という名前で `metrics.csv` に入る．アンカーの判定は数ではなくカテゴリなので `events.jsonl` の `x.yang2024.anchor` へ書く (観測値そのものは run スコープ指標にもある)．照合先の帯は論文が報告した数値ではなくこの再現実装が置いたアンカーなので，出典を要求する `reference.csv` には書かない．Python の `oasis-tools reproduce` がこれらを読み，`recsys_diffusion.png`・`polarization_crowd.png`・`cascade_timeseries.png` を描く．
 
 決定論的 socsim コア (BA 網・活性化・推薦器・情報伝播・指標) は LLM 無しで動く．LLM の部分は leader の行動選択のみである．`--mock` を付けると，その部分を決定論的 scripted クライアント («同調的増幅器» の戯画: leader は推薦フィード先頭をリポストし，フィードが空なら新規投稿する) で駆動するため，`reproduce` は完全にオフライン / サンドボックスで検証できる．mock は seed を固定すれば bit 決定論的である．
 
@@ -89,7 +130,7 @@ OASIS の見出し的な創発現象を一括再現する — **情報拡散** (
 | `--mock` | off | 決定論的 scripted クライアントで駆動する (ライブ LLM 不要) |
 | `--quick` | off | `N` / `runs` / `T` を縮小したスモーク |
 | `--cache-path` | `.llm_cache/cache.json` | 共有プロンプトキャッシュ (live のみ) |
-| `--output-dir` | `results` | 出力ベースディレクトリ |
+| `--output-dir` | `results` | runvault の results ルート |
 
 ```bash
 # オフライン一括再現 (ライブ LLM 不要)

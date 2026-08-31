@@ -58,7 +58,9 @@ Agents are **nodes on a dynamic social graph**, not spatial agents, so the spati
 
 ## Output
 
-`results/{YYYYMMDD_HHMMSS}/` (with a `latest` symlink): `config.json`, `metrics.csv` (long-format `t,metric,value`), `cascades.csv`, `llm_meta.json` (provider/model/temp/seed/cache-hit), and for sweeps `sweep_summary.csv` + `sweep_config.json`.
+[runvault](https://github.com/akitenkrad/rs-runvault) owns where output goes and how it is named. One subcommand invocation is one run, and the run directory *is* the output directory, so there is no timestamped subdirectory and no `latest` symlink.
+
+`results/oasis/<subcommand>_<time>_<cfg8>_<exec4>/` holds `run.json` (git commit / env / LLM / paper), `config.json` (an envelope; the conditions sit under `parameters`), `metrics.csv` (long form `run_uid, step, step_unit, scope, name, value`), `events.jsonl`, `status.json` and `manifest.csv`. The cascade table is `x.yang2024.cascade` lines in `events.jsonl` (one row per cascade with no time axis, so it cannot go in `metrics.csv`), and the LLM model / provider / temperature live in the `llm` block of `run.json`. A sweep is a parent run plus one child (`sweep-point`) per condition, each trial's final values being a `terminal` event in the child. See the [CLI reference](cli.md).
 
 ## References
 

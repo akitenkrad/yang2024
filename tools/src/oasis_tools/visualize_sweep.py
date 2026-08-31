@@ -2,14 +2,18 @@
 """
 visualize_sweep.py — Yang et al. (2024) OASIS スイープ結果 可視化スクリプト
 
-results/latest (または --sweep_dir 指定先) の sweep_summary.csv を読み，
+sweep 親 run の子 run を集めて «1 行 1 試行» の表を組み直し (`sweep_summary` モジュール)，
 N (エージェント数) × activation_rate (活性化率) の格子について最終集団指標
 (極化指数 P・意見多様性・伝播到達数・最大カスケード規模) を集計し，ヒートマップと
 折れ線で可視化する．論文の核心であるスケール効果 (N 増 → P・多様性増) の確認用．
 
+--sweep_dir を省略すると
+`runvault path --experiment oasis --latest --subcommand sweep`
+が返す sweep 親の run ディレクトリを対象にする (`runvault` が PATH にある必要がある)．
+
 Usage:
     uv run oasis-tools visualize-sweep
-    uv run oasis-tools visualize-sweep --sweep_dir results/20260525_160000_sweep
+    uv run oasis-tools visualize-sweep --sweep_dir "$(runvault path --experiment oasis --latest --subcommand sweep)"
 
 Outputs:
     output_dir/
@@ -26,6 +30,12 @@ import os
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from runvault.read import figures_dir, runvault_path
+
+from oasis_tools.sweep_summary import sweep_summary_table
+
+# runvault の experiment 名 (Rust 側 record::EXPERIMENT と揃える)．
+EXPERIMENT = "oasis"
 
 plt.rcParams["font.family"] = "Hiragino Sans"
 
@@ -33,11 +43,8 @@ COLOR_BG = "#FAFAF8"
 
 
 def load_summary(sweep_dir: str) -> pd.DataFrame:
-    """sweep_summary.csv を読み込む．"""
-    path = os.path.join(sweep_dir, "sweep_summary.csv")
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"sweep_summary.csv が見つかりません: {path}")
-    return pd.read_csv(path)
+    """1 行 1 試行の表．runvault の run からも legacy の CSV からも読める．"""
+    return sweep_summary_table(sweep_dir)
 
 
 def pivot_metric(df: pd.DataFrame, metric: str) -> pd.DataFrame:
@@ -115,14 +122,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--sweep_dir",
         "--sweep-dir",
-        default="results/latest",
-        help="スイープ出力ディレクトリ (default: results/latest)",
+        default=None,
+        help="sweep 親の run ディレクトリ (省略時は runvault path --latest --subcommand sweep)",
+    )
+    p.add_argument(
+        "--results_root",
+        "--results-root",
+        default="results",
+        help="runvault の results ルート (default: results)",
+    )
+    p.add_argument(
+        "--experiment",
+        default=EXPERIMENT,
+        help=f"runvault の experiment 名 (default: {EXPERIMENT})",
     )
     p.add_argument(
         "--output_dir",
         "--output-dir",
         default=None,
-        help="図の保存先ディレクトリ (default: {sweep_dir}/figures)",
+        help="図の保存先ディレクトリ (default: <experiment>/figures/<run_slug>)",
     )
     return p.parse_args(argv)
 
@@ -130,16 +148,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
 
-    out_dir = args.output_dir if args.output_dir else os.path.join(args.sweep_dir, "figures")
+    sweep_dir = args.sweep_dir or runvault_path(
+        args.experiment, args.results_root, subcommand="sweep"
+    )
+    out_dir = args.output_dir if args.output_dir else figures_dir(sweep_dir)
     os.makedirs(out_dir, exist_ok=True)
 
     print("=== Yang et al. (2024) OASIS スイープ可視化 ===")
-    print(f"スイープ: {args.sweep_dir}")
+    print(f"スイープ: {sweep_dir}")
     print(f"出力先:   {out_dir}")
     print("-------------------------------------------------")
 
-    print("[1/3] sweep_summary.csv を読み込み中 ...")
-    df = load_summary(args.sweep_dir)
+    print("[1/3] 子 run から試行表を組み直し中 ...")
+    df = load_summary(sweep_dir)
     print(f"      N {df['n_agents'].nunique()} 種 × activation {df['activation_rate'].nunique()} 種")
 
     print("[2/3] ヒートマップを保存中 ...")

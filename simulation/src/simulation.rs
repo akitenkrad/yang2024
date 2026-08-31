@@ -7,8 +7,8 @@
 //!   する．bit 単位で再現する．
 //! - **上層 (非決定的 LLM レイヤ)**: [`crate::llm`] のキャッシュ付き Ollama→OpenAI
 //!   フォールバッククライアントに閉じ込め，`temperature=0`/`seed` 固定 + プロンプト
-//!   →応答キャッシュで擬似決定論化する．モデル・endpoint・温度・seed・cache-hit を
-//!   `llm_meta.json` に記録する．
+//!   →応答キャッシュで擬似決定論化する．モデル・温度は `run.json` の `llm`
+//!   ブロックが，呼び出し数と cache-hit 率は `metrics.csv` の run スコープ指標が持つ．
 //!
 //! # leader (オピニオンリーダー) の決定
 //!
@@ -21,7 +21,6 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use rand::Rng;
-use serde::Serialize;
 
 use socsim_core::{derive_seed, AgentId, SimRng};
 use socsim_engine::{RandomActivationScheduler, SimulationBuilder};
@@ -29,7 +28,7 @@ use socsim_llm::{LlmClient, MetadataCollector};
 use socsim_net::SocialNetwork;
 
 use crate::config::Config;
-use crate::llm::{build_live_client, OasisClient};
+use crate::llm::OasisClient;
 use crate::mechanisms::{
     ActivationMechanism, AgentActionMechanism, FeedRecommendationMechanism,
     InfoPropagationMechanism, MetricsMechanism, PostStepMechanism, SharedBudget, SharedClient,
@@ -143,13 +142,6 @@ pub fn select_leaders(world: &OasisWorld, n_leaders: usize) -> Vec<AgentId> {
         .collect()
 }
 
-/// シミュレーションを実行する (本番 LLM クライアントを構築して駆動)．
-pub fn run(cfg: &Config) -> Result<SimulationResult, String> {
-    let client =
-        build_live_client(&cfg.llm).map_err(|e| format!("LLM クライアント構築に失敗: {e}"))?;
-    run_with_client(cfg, client)
-}
-
 /// オフライン (LLM 不要) の決定論的 mock でシミュレーションを実行する．
 ///
 /// [`crate::reproduce_mock::build_reproduce_client`] の scripted クライアント
@@ -157,6 +149,10 @@ pub fn run(cfg: &Config) -> Result<SimulationResult, String> {
 /// ライブ LLM 無しで論文の創発現象 (情報拡散 / 極化 / 群衆効果) を構造的に再現する．
 /// mock は in-memory cache なので永続キャッシュ保存はスキップされる
 /// (`cfg.llm.cache_path` は無視する; 誤って `save()` を呼ばないよう倒す)．
+///
+/// バイナリ側はこれを通さず [`run_with_client`] にクライアントを直接渡す — `run.json`
+/// の `llm` ブロックに書くモデル名を知っているのはクライアントを組んだ側だけだからで
+/// ある．ここに残っているのは統合テストがオフライン経路をこの名前で呼ぶためである．
 pub fn run_mock(cfg: &Config) -> Result<SimulationResult, String> {
     let mut mock_cfg = cfg.clone();
     mock_cfg.llm.cache_path = None;
@@ -165,8 +161,12 @@ pub fn run_mock(cfg: &Config) -> Result<SimulationResult, String> {
 
 /// 与えられた [`OasisClient`] でシミュレーションを実行する．
 ///
-/// 本番は [`build_live_client`] の結果を，テストは [`crate::llm::wrap_client`] で
-/// ラップした `mock::ScriptedClient` を渡す．
+/// 本番は [`crate::llm::build_live_client`] の結果を，テストは
+/// [`crate::llm::wrap_client`] でラップした `mock::ScriptedClient` を渡す．
+///
+/// ライブクライアントを内側で組む入口はもう無い．`run.json` の `llm` ブロックに書く
+/// モデル名と endpoint を知っているのはクライアントを組んだ側だけなので，中で組める口が
+/// 残っていると，そのブロックを埋めないまま記録できてしまう．
 pub fn run_with_client(cfg: &Config, client: OasisClient) -> Result<SimulationResult, String> {
     let root = cfg.seed.unwrap_or_else(rand::random);
 
@@ -270,84 +270,6 @@ fn herd_disagree_rate(world: &OasisWorld) -> f64 {
     }
 }
 
-// --------------------------------------------------------------------------- //
-// 出力
-// --------------------------------------------------------------------------- //
-
-/// メトリクス履歴を long-format CSV (metrics.csv) に保存する．
-///
-/// 各 [`StepMetrics`] を `to_rows()` で long-format 行へ展開し，展開後の行列を
-/// `socsim_results::write_csv` で書き出す (各行を `serialize` し先頭行にヘッダを
-/// 書く csv クレットの標準挙動; 従来の手書き writer とバイト等価)．行構造体は
-/// repo 固有のままで，writer だけを共有化する．
-pub fn save_metrics(metrics: &[StepMetrics], output_dir: &str) {
-    let path = format!("{}/metrics.csv", output_dir);
-    let rows: Vec<_> = metrics.iter().flat_map(|m| m.to_rows()).collect();
-    socsim_results::write_csv(&rows, &path).expect("metrics.csv の書き込みに失敗");
-}
-
-/// カスケード行を cascades.csv に保存する．
-///
-/// 書き出し機構は `socsim_results::write_csv` に委譲する ([`CascadeRow`] を
-/// `serialize`; 従来の手書き writer とバイト等価)．
-pub fn save_cascades(rows: &[CascadeRow], output_dir: &str) {
-    let path = format!("{}/cascades.csv", output_dir);
-    socsim_results::write_csv(rows, &path).expect("cascades.csv の書き込みに失敗");
-}
-
-/// `llm_meta.json` の構造体 (LLM モデル・endpoint・温度・seed・cache 統計)．
-#[derive(Serialize)]
-pub struct LlmMetaJson {
-    pub provider: String,
-    pub llm_model: String,
-    pub llm_endpoint: String,
-    pub llm_temperature: f32,
-    pub llm_seed: u64,
-    pub total_calls: usize,
-    pub cache_hits: usize,
-    pub cache_hit_rate: f64,
-    pub determinism_note: &'static str,
-}
-
-/// `llm_meta.json` を保存する．
-pub fn save_llm_meta(result: &SimulationResult, cfg: &Config, output_dir: &str) {
-    let provider =
-        if result.llm_endpoint.contains("11434") || result.llm_endpoint.contains("ollama") {
-            "ollama"
-        } else if result.llm_endpoint.contains("mock") {
-            "mock"
-        } else {
-            "openai"
-        };
-    let meta = LlmMetaJson {
-        provider: provider.to_string(),
-        llm_model: result.llm_model.clone(),
-        llm_endpoint: result.llm_endpoint.clone(),
-        llm_temperature: cfg.llm.temperature,
-        llm_seed: cfg.llm.seed,
-        total_calls: result.metadata.total(),
-        cache_hits: result.metadata.cache_hits(),
-        cache_hit_rate: result.metadata.cache_hit_rate(),
-        determinism_note: "LLM output is outside socsim bit-reproducibility; the prompt->response \
-                           cache (with temperature=0 and fixed seed) is the reproducibility \
-                           mechanism. The socsim core (BA network, activation, recommender, \
-                           info propagation, metrics) is deterministic given the seed.",
-    };
-    // pretty-print JSON の書き出しは socsim_results::write_json に委譲する
-    // (内部は serde_json::to_writer_pretty + flush; 従来の writer とバイト等価)．
-    // provider/model/endpoint/temperature/seed の値は従来どおり result / cfg から
-    // 採り，LlmMetaJson の構造 (フィールド名・順序・determinism_note) を保持する
-    // (`MetadataCollector::summary()` は cache-hit 100% 再実行や呼び出し 0 件で
-    // endpoint/model が変わりうるため，バイト等価のためここでは使わない)．
-    let path = format!("{}/llm_meta.json", output_dir);
-    socsim_results::write_json(&meta, &path).expect("llm_meta.json の書き込みに失敗");
-}
-
-/// 出力ディレクトリを作成する．
-pub fn ensure_output_dir(output_dir: &str) {
-    socsim_results::ensure_dir(output_dir).expect("出力ディレクトリの作成に失敗");
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,7 +307,6 @@ mod tests {
             convergence_patience: 100, // 早期停止させない
             seed: Some(42),
             llm: LlmSettings::default(),
-            output_dir: "results".to_string(),
         }
     }
 

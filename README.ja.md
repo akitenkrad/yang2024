@@ -13,7 +13,7 @@ LLM の出力は socsim の bit 再現性の **外側** にある．したがっ
 - **決定論的 socsim コア** — BA 網生成・Time-Engine 活性化・推薦器 (興味マッチ / ホットスコア / アブレーション)・動的フォローグラフ上の情報伝播・指標．seed を与えれば bit 単位で再現する．
 - **非決定的 LLM レイヤ** — オピニオンリーダーの CoT 行動選択．`socsim-llm` の `CachingClient` (`hash(prompt+model)` → 応答キャッシュ)・`temperature=0`・固定 seed で擬似決定論化する．プロバイダ順は `socsim-llm` の `FallbackClient` により **Ollama 第一 → OpenAI フォールバック**．
 
-再現性を担うのはモデルではなく**キャッシュ**である: ウォームキャッシュは同一応答を再生するため，再実行はコスト 0 で安定する．各実行は `llm_meta.json` にプロバイダ・モデル・endpoint・温度・seed・cache-hit 率を記録する．ローカル既定モデル (`llama3.2:latest`) は論文の GPT 系と異なるため，再現目標は**定性的** (カスケードの伸び・極化の増大・スケール効果の傾向と符号) であり，論文の数値完全一致は狙わない．
+再現性を担うのはモデルではなく**キャッシュ**である: ウォームキャッシュは同一応答を再生するため，再実行はコスト 0 で安定する．各実行はプロバイダ・モデル・温度を runvault の `run.json` の `llm` ブロックに，呼び出し数と cache-hit 率を `metrics.csv` の run スコープ指標に記録する．ローカル既定モデル (`llama3.2:latest`) は論文の GPT 系と異なるため，再現目標は**定性的** (カスケードの伸び・極化の増大・スケール効果の傾向と符号) であり，論文の数値完全一致は狙わない．
 
 ## スケーラビリティ設計
 
@@ -42,7 +42,7 @@ uv sync
 uv run oasis-tools visualize
 
 # 実行設定と LLM メタデータの確認
-uv run oasis-tools show-experiment-settings --results-dir results/latest
+uv run oasis-tools show-experiment-settings
 ```
 
 ### オフラインスモーク (ライブ LLM 不要)
@@ -69,7 +69,7 @@ cargo run --release -- run --n-leaders 0 --n-agents 40 --timesteps 10 --seed 42
 
 - **`run`** — コア動的ネットワークモデル: Time-Engine 活性化・決定論的推薦器 (興味マッチ / ホットスコア / アブレーション)・LLM を閉じ込めたリーダー行動メカニズム (Ollama→OpenAI フォールバック + プロンプトキャッシュ)・フォローグラフ上の情報伝播・指標．
 - **`sweep`** — エージェント数 × 活性化率の感度分析．
-- **`reproduce`** — OASIS の見出し的な創発現象 (情報拡散カスケード・グループ極化・群衆 / 群れ効果) を RecSys アブレーション (interest / hot-score / none) で対比した一括再現．`--mock` 決定論的 scripted クライアントにより完全オフライン・bit 決定論的に動く．観測値を論文の定性的知見と突き合わせ採点し，`reproduce_summary.json` と図を出力する．
+- **`reproduce`** — OASIS の見出し的な創発現象 (情報拡散カスケード・グループ極化・群衆 / 群れ効果) を RecSys アブレーション (interest / hot-score / none) で対比した一括再現．`--mock` 決定論的 scripted クライアントにより完全オフライン・bit 決定論的に動く．観測値を論文の定性的知見と突き合わせ採点し，判定を run の `events.jsonl` に，条件別の指標を `metrics.csv` に残して図を出力する．
 - **Python `oasis-tools`** — `visualize` / `visualize-sweep` / `show-experiment-settings` / `reproduce` (レポート + 図)．
 
 論文の 100 万エージェント規模はここでは実行しない: 実装はスケール経路 (活性化サブサンプリング・リーダーのみ LLM の二層詳細度・プロンプトキャッシュ・`--llm-budget`) を文書化し，既定は小規模 `N` とする．再現忠実度は定性的である — ローカル llama3.2 は論文の GPT-3.5/4 ではないため，目標は傾向 (多段カスケード・創発する極化・推薦器が形作る拡散) であり，絶対値一致ではない．

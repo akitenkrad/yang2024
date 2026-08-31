@@ -2,16 +2,20 @@
 """
 visualize.py — Yang et al. (2024) OASIS 単一実行結果 可視化スクリプト
 
-results/latest (または --results_dir 指定先) の metrics.csv (long-format) と
-cascades.csv を読み，以下の図を生成する:
+run ディレクトリの metrics.csv と events.jsonl (カスケード) を読み，
+以下の図を生成する:
 (1) 極化指数 P の時系列 (グループ極化; Finding 2)
 (2) active-user 数の時系列 (Time Engine 検証)
 (3) 伝播到達数・最大カスケード規模の時系列 (情報拡散; Finding 1)
 (4) カスケード木 (規模上位カスケードの root → リポストの簡易ツリー; networkx)
 
+--results_dir を省略すると
+`runvault path --experiment oasis --latest --subcommand run`
+が返す run ディレクトリを対象にする (`runvault` が PATH にある必要がある)．
+
 Usage:
     uv run oasis-tools visualize
-    uv run oasis-tools visualize --results_dir results/20260525_103000
+    uv run oasis-tools visualize --results_dir "$(runvault path --experiment oasis --latest --subcommand run)"
     uv run oasis-tools visualize --output_dir out --no-graph
 
 Outputs:
@@ -27,6 +31,13 @@ import os
 
 import matplotlib.pyplot as plt
 import pandas as pd
+from runvault.read import events_table, figures_dir, metrics_wide, runvault_path
+
+# --------------------------------------------------------------------------- #
+# runvault の名前 (Rust 側 record.rs と揃える)
+# --------------------------------------------------------------------------- #
+EXPERIMENT = "oasis"
+CASCADE_EVENT = "x.yang2024.cascade"
 
 # --------------------------------------------------------------------------- #
 # 日本語フォント設定
@@ -44,20 +55,37 @@ COLOR_CASC = "#FF9800"
 
 
 def load_metrics(path: str) -> pd.DataFrame:
-    """metrics.csv (long-format: t, metric, value) を wide-format にピボットする．"""
+    """metrics.csv を wide-format にピボットし，時間軸の列名を `t` に揃える．
+
+    runvault 移行前の metrics.csv は long でも列が `t, metric, value` だったので，
+    移行前の results/ もそのまま読めるようにしておく．
+    """
     if not os.path.exists(path):
         raise FileNotFoundError(f"metrics.csv が見つかりません: {path}")
-    long_df = pd.read_csv(path)
-    wide = long_df.pivot_table(index="t", columns="metric", values="value").reset_index()
-    wide.columns.name = None
-    return wide.sort_values("t").reset_index(drop=True)
+    df = pd.read_csv(path)
+    if {"t", "metric", "value"}.issubset(df.columns):
+        wide = df.pivot_table(index="t", columns="metric", values="value").reset_index()
+        wide.columns.name = None
+        return wide.sort_values("t").reset_index(drop=True)
+    return metrics_wide(path).rename(columns={"step": "t"})
 
 
 def load_cascades(results_dir: str) -> pd.DataFrame | None:
-    path = os.path.join(results_dir, "cascades.csv")
-    if os.path.exists(path):
-        return pd.read_csv(path)
-    return None
+    """カスケード表 (root_post / author / size)．
+
+    runvault の run では `events.jsonl` の `x.yang2024.cascade` 行にある — カスケードは
+    時間軸を持たない «1 本 1 行» の表なので，全行が同じ主キーを名乗ってしまう
+    `metrics.csv` には置けない．移行前の run には `cascades.csv` がある．
+    """
+    legacy = os.path.join(results_dir, "cascades.csv")
+    if os.path.exists(legacy):
+        return pd.read_csv(legacy)
+    if not os.path.exists(os.path.join(results_dir, "events.jsonl")):
+        return None
+    try:
+        return events_table(results_dir, kind=CASCADE_EVENT)
+    except SystemExit:
+        return None
 
 
 def save_metrics_timeseries(df: pd.DataFrame, out_path: str) -> None:
@@ -171,14 +199,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--results_dir",
         "--results-dir",
-        default="results/latest",
-        help="Rust シミュレーションの出力ディレクトリ (default: results/latest)",
+        default=None,
+        help="run ディレクトリ (省略時は runvault path --latest --subcommand run)",
+    )
+    p.add_argument(
+        "--results_root",
+        "--results-root",
+        default="results",
+        help="runvault の results ルート (default: results)",
+    )
+    p.add_argument(
+        "--experiment",
+        default=EXPERIMENT,
+        help=f"runvault の experiment 名 (default: {EXPERIMENT})",
     )
     p.add_argument(
         "--output_dir",
         "--output-dir",
         default=None,
-        help="図の保存先ディレクトリ (default: {results_dir}/figures)",
+        help="図の保存先ディレクトリ (default: <experiment>/figures/<run_slug>)",
     )
     p.add_argument(
         "--no-graph",
@@ -191,11 +230,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
 
-    metrics_path = os.path.join(args.results_dir, "metrics.csv")
-    out_dir = args.output_dir if args.output_dir else os.path.join(args.results_dir, "figures")
+    # sweep の子 run は subcommand=sweep-point なので，--subcommand run だけで
+    # 単発の run に絞れる．
+    results_dir = args.results_dir or runvault_path(
+        args.experiment, args.results_root, subcommand="run"
+    )
+    metrics_path = os.path.join(results_dir, "metrics.csv")
+    out_dir = args.output_dir if args.output_dir else figures_dir(results_dir)
     os.makedirs(out_dir, exist_ok=True)
 
     print("=== Yang et al. (2024) OASIS 単一実行結果 可視化 ===")
+    print(f"run:        {results_dir}")
     print(f"メトリクス: {metrics_path}")
     print(f"出力先:     {out_dir}")
     print("-----------------------------------------")
@@ -206,12 +251,12 @@ def main(argv: list[str] | None = None) -> None:
     save_metrics_timeseries(df, os.path.join(out_dir, "metrics_timeseries.png"))
 
     if not args.no_graph:
-        cascades = load_cascades(args.results_dir)
+        cascades = load_cascades(results_dir)
         if cascades is not None:
             print("[2/2] カスケード木を保存中 ...")
             save_cascade_tree(cascades, os.path.join(out_dir, "cascade_tree.png"))
         else:
-            print("[2/2] cascades.csv が無いためカスケード木描画をスキップ．")
+            print("[2/2] カスケードの記録が無いため木の描画をスキップ．")
     else:
         print("[2/2] --no-graph 指定によりカスケード木描画をスキップ．")
 

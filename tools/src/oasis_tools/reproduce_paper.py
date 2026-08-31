@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """reproduce_paper.py — Yang et al. (2024) OASIS 創発現象の一括再現レポート + 図．
 
-Rust の `oasis reproduce` が書き出す `reproduce_summary.json` (RecSys アブレーション
-行列・論文知見アンカー) と条件別 `metrics_<recsys>.csv` を読み，論文の中心的な創発
-現象を 3 つの図で可視化しつつ PASS/off テーブルを表示する:
+Rust の `oasis reproduce` が書いた run ディレクトリを読み，論文の中心的な創発現象を
+3 つの図で可視化しつつ PASS/off テーブルを表示する．RecSys アブレーション行列は
+`metrics.csv` の run スコープ指標 (`<推薦器>_mean_*`)，アンカーの判定は `events.jsonl`
+の `x.yang2024.anchor` にある:
 
     1. recsys_diffusion.png
        推薦器 (interest / hot-score / none) 別の最終 伝播到達・最大カスケード規模・
@@ -20,15 +21,19 @@ Rust の `oasis reproduce` が書き出す `reproduce_summary.json` (RecSys ア�
 `--run` を付けると先に Rust バイナリ (`cargo run --release -- reproduce`) を実行して
 最新結果を生成する．サンドボックス・CI では `--mock` も付けてライブ LLM を回避する．
 
+--results-dir を省略すると
+`runvault path --experiment oasis --latest --subcommand reproduce`
+が返す run ディレクトリを対象にする (`runvault` が PATH にある必要がある)．
+
 Usage:
     uv run oasis-tools reproduce --run --mock          # mock で一括再現 + 図
     uv run oasis-tools reproduce --run --mock --quick  # 軽量版 (動作確認用)
-    uv run oasis-tools reproduce                        # 既存 results/latest を可視化
-    uv run oasis-tools reproduce --results-dir results/reproduce_20260530_000000
+    uv run oasis-tools reproduce                        # 既存の最新 reproduce run を可視化
+    uv run oasis-tools reproduce --results-dir "$(runvault path --experiment oasis --latest --subcommand reproduce)"
     uv run oasis-tools reproduce --json
 
 Outputs:
-    {results_dir}/figures/{recsys_diffusion,polarization_crowd,cascade_timeseries}.png
+    <experiment>/figures/<run_slug>/{recsys_diffusion,polarization_crowd,cascade_timeseries}.png
     stdout: アンカーごとの PASS / OFF．
 """
 
@@ -45,7 +50,32 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from socsim_tools.io import resolve_results_dir
+from runvault.read import (
+    config_parameters,
+    events_table,
+    figures_dir,
+    metrics_wide,
+    run_scope_metrics,
+    runvault_path,
+)
+
+# --------------------------------------------------------------------------- #
+# runvault 側の名前 (Rust 側 record.rs と揃える)
+# --------------------------------------------------------------------------- #
+EXPERIMENT = "oasis"
+ANCHOR_EVENT = "x.yang2024.anchor"
+
+#: 条件セルの run スコープ指標 (Rust 側 ReproCell::metrics と同じ並び)．
+CELL_METRICS = [
+    "mean_propagation_reach",
+    "mean_cascade_size_max",
+    "mean_cascade_max_breadth",
+    "mean_n_posts",
+    "mean_polarization_index",
+    "mean_polarization_gain",
+    "mean_herd_disagree_rate",
+    "mean_final_step",
+]
 
 # --------------------------------------------------------------------------- #
 # 表示設定 (CJK フォントが利用不能でも落ちないように try)
@@ -80,15 +110,29 @@ def _run_binary(*, mock: bool, quick: bool, seed: int, output_dir: str) -> None:
     subprocess.run(cmd, check=True)
 
 
-def _load_summary(results_dir: Path) -> dict:
-    path = results_dir / "reproduce_summary.json"
-    if not path.exists():
-        raise FileNotFoundError(
-            f"reproduce_summary.json が見つかりません: {path}\n"
-            f"  先に `oasis-tools reproduce --run --mock` を実行してください．"
-        )
-    with path.open(encoding="utf-8") as f:
-        return json.load(f)
+def cell_table(scoped: dict[str, float], recsys_values: list[str]) -> list[dict]:
+    """RecSys アブレーション行列を 1 行 1 条件の並びに組み直す．
+
+    runvault にはこの表がファイルとして存在しない．`metrics.csv` の run スコープ指標は
+    `<推薦器ラベル>_<指標名>` という名前で 1 本の run に同居しているので，ラベルで
+    切り分ける．
+    """
+    cells: list[dict] = []
+    for label in recsys_values:
+        if f"{label}_{CELL_METRICS[0]}" not in scoped:
+            continue
+        cell = {"label": label}
+        cell.update({name: scoped[f"{label}_{name}"] for name in CELL_METRICS})
+        cells.append(cell)
+    return cells
+
+
+def anchor_rows(run_dir: Path) -> list[dict]:
+    """`events.jsonl` のアンカー判定．無ければ空 (表を 1 つ落とすだけ)．"""
+    try:
+        return events_table(run_dir, kind=ANCHOR_EVENT).to_dict(orient="records")
+    except (FileNotFoundError, SystemExit):
+        return []
 
 
 def _recsys_color(label: str) -> str:
@@ -100,9 +144,8 @@ def _recsys_color(label: str) -> str:
 # --------------------------------------------------------------------------- #
 
 
-def _recsys_diffusion(summary: dict, out_path: Path) -> None:
+def _recsys_diffusion(cells: list[dict], out_path: Path) -> None:
     """推薦器別の最終 伝播到達・最大カスケード規模・幅 棒グラフ (情報拡散)．"""
-    cells = summary["recsys_ablation"]
     labels = [c["label"] for c in cells]
     colors = [_recsys_color(t) for t in labels]
     x = np.arange(len(labels))
@@ -134,9 +177,8 @@ def _recsys_diffusion(summary: dict, out_path: Path) -> None:
     print(f"  保存: {out_path}")
 
 
-def _polarization_crowd(summary: dict, out_path: Path) -> None:
+def _polarization_crowd(cells: list[dict], out_path: Path) -> None:
     """推薦器別の最終 極化指数 P・極化増分・群衆追随率 棒グラフ．"""
-    cells = summary["recsys_ablation"]
     labels = [c["label"] for c in cells]
     colors = [_recsys_color(t) for t in labels]
     x = np.arange(len(labels))
@@ -169,15 +211,12 @@ def _polarization_crowd(summary: dict, out_path: Path) -> None:
     print(f"  保存: {out_path}")
 
 
-def _metric_series(df: pd.DataFrame, metric: str) -> pd.DataFrame:
-    """long-format metrics.csv から 1 指標の (t, value) 系列を取り出す．"""
-    sub = df[df["metric"] == metric][["t", "value"]].sort_values("t")
-    return sub
+def _cascade_timeseries(cells: list[dict], wide: pd.DataFrame, out_path: Path) -> None:
+    """推薦器別の最大カスケード規模・伝播到達 時系列 (代表 run)．
 
-
-def _cascade_timeseries(summary: dict, results_dir: Path, out_path: Path) -> None:
-    """推薦器別の最大カスケード規模・伝播到達 時系列 (代表 run)．"""
-    cells = summary["recsys_ablation"]
+    3 条件が 1 本の run に同居するので，系列は `<推薦器ラベル>_<指標名>` という名前で
+    区別されている．
+    """
     fig, axes = plt.subplots(1, 2, figsize=(13, 5), facecolor=COLOR_BG)
     fig.suptitle(
         "Yang et al. (2024) OASIS — カスケード成長 (代表 run; 推薦器別)",
@@ -192,14 +231,15 @@ def _cascade_timeseries(summary: dict, results_dir: Path, out_path: Path) -> Non
         ax.set_facecolor(COLOR_BG)
         for c in cells:
             label = c["label"]
-            path = results_dir / f"metrics_{label}.csv"
-            if not path.exists():
+            column = f"{label}_{metric}"
+            if column not in wide.columns:
                 continue
-            df = pd.read_csv(path)
-            series = _metric_series(df, metric)
+            # 条件ごとに停止するステップが違う．pivot は足りない側を NaN で埋めるので，
+            # 切り出した後に落とす — 描かない点と «値が 0» を取り違えないため．
+            series = wide[["step", column]].dropna()
             if series.empty:
                 continue
-            ax.plot(series["t"], series["value"], color=_recsys_color(label),
+            ax.plot(series["step"], series[column], color=_recsys_color(label),
                     lw=2, marker="o", markersize=3, label=label)
             plotted += 1
         ax.set_xlabel("時刻 t (ステップ)")
@@ -209,7 +249,7 @@ def _cascade_timeseries(summary: dict, results_dir: Path, out_path: Path) -> Non
         ax.grid(True, alpha=0.3)
 
     if plotted == 0:
-        print("  警告: metrics_<recsys>.csv が無いため cascade_timeseries をスキップ")
+        print("  警告: 条件別の系列が無いため cascade_timeseries をスキップ")
         plt.close(fig)
         return
 
@@ -224,33 +264,38 @@ def _cascade_timeseries(summary: dict, results_dir: Path, out_path: Path) -> Non
 # --------------------------------------------------------------------------- #
 
 
-def _print_report(summary: dict, results_dir: Path) -> None:
+def _print_report(
+    params: dict,
+    scoped: dict[str, float],
+    cells: list[dict],
+    anchors: list[dict],
+    results_dir: Path,
+) -> None:
     print("=" * 78)
     print("Yang et al. (2024) OASIS — 創発現象 一括再現レポート")
-    print(f"  source: {results_dir}  (mode={summary.get('mode', '?')})")
+    mode = "mock" if params.get("mock") else "live"
+    print(f"  source: {results_dir}  (mode={mode})")
     print("=" * 78)
 
     print("\n[RecSys アブレーション行列 (拡散 / 極化 / 群衆効果)]")
     print(f"  {'recsys':<12}{'reach':>8}{'casc':>8}{'breadth':>8}"
           f"{'P':>10}{'P-gain':>9}{'herd':>8}")
-    for c in summary["recsys_ablation"]:
+    for c in cells:
         print(f"  {c['label']:<12}{c['mean_propagation_reach']:>8.2f}"
               f"{c['mean_cascade_size_max']:>8.2f}{c['mean_cascade_max_breadth']:>8.2f}"
               f"{c['mean_polarization_index']:>10.4f}{c['mean_polarization_gain']:>9.4f}"
               f"{c['mean_herd_disagree_rate']:>8.3f}")
 
     print("\n[論文知見アンカー (観測 vs 論文)]")
-    n_pass = 0
-    for a in summary["anchors"]:
+    for a in anchors:
         hi = a["target_hi"]
-        hi_str = "∞" if hi is None or hi > 1e30 else f"{hi:.3f}"
+        hi_str = "∞" if hi is None or pd.isna(hi) else f"{hi:.3f}"
         status = "PASS" if a["pass"] else "OFF "
-        if a["pass"]:
-            n_pass += 1
-        print(f"  [{status}] {a['name']:<50} obs={a['observed']:.4f} "
+        print(f"  [{status}] {a['name']:<26} obs={a['observed']:.4f} "
               f"target=[{a['target_lo']:.3f},{hi_str}] paper={a['paper']}")
     print("-" * 78)
-    print(f"{n_pass}/{len(summary['anchors'])} アンカーが in-band")
+    print(f"{int(scoped.get('anchors_passed', 0))}/"
+          f"{int(scoped.get('anchors_total', len(anchors)))} アンカーが in-band")
     print("(中核知見: 推薦器が情報カスケードを形作る / 同調的増幅で極化・群衆効果が創発)")
 
 
@@ -266,9 +311,14 @@ def main(argv: list[str] | None = None) -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--results-dir", "--results_dir", default=None,
-                        help="reproduce_summary.json のあるディレクトリ (既定: results/latest)")
+                        help="`oasis reproduce` の run ディレクトリ "
+                             "(省略時は runvault path --latest --subcommand reproduce)")
+    parser.add_argument("--results-root", "--results_root", default="results",
+                        help="runvault の results ルート (default: results)")
+    parser.add_argument("--experiment", default=EXPERIMENT,
+                        help=f"runvault の experiment 名 (default: {EXPERIMENT})")
     parser.add_argument("--output-dir", "--output_dir", default=None,
-                        help="図の保存先 (既定: {results_dir}/figures)")
+                        help="図の保存先 (既定: <experiment>/figures/<run_slug>)")
     parser.add_argument("--run", action="store_true",
                         help="先に Rust バイナリ (reproduce) を実行する．")
     parser.add_argument("--mock", action="store_true",
@@ -285,25 +335,42 @@ def main(argv: list[str] | None = None) -> int:
         _run_binary(mock=args.mock, quick=args.quick, seed=args.seed,
                     output_dir=args.cargo_output_dir)
 
-    results_dir = resolve_results_dir(args.results_dir)
-    try:
-        summary = _load_summary(results_dir)
-    except FileNotFoundError as exc:
-        print(f"エラー: {exc}", file=sys.stderr)
+    results_dir = Path(
+        args.results_dir
+        or runvault_path(args.experiment, args.results_root, subcommand="reproduce")
+    )
+    if not (results_dir / "metrics.csv").exists():
+        print(f"エラー: metrics.csv が見つかりません: {results_dir}\n"
+              f"  先に `oasis-tools reproduce --run --mock` を実行してください．",
+              file=sys.stderr)
         return 1
 
+    params = config_parameters(results_dir) or {}
+    scoped = run_scope_metrics(results_dir)
+    cells = cell_table(scoped, list(params.get("recsys_values") or RECSYS_COLORS))
+    anchors = anchor_rows(results_dir)
+
     if args.json:
-        print(json.dumps(summary, indent=2, ensure_ascii=False))
+        payload = {
+            "source": str(results_dir),
+            "parameters": params,
+            "run_scope_metrics": scoped,
+            "recsys_ablation": cells,
+            "anchors": anchors,
+        }
+        print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
         return 0
 
-    _print_report(summary, results_dir)
+    _print_report(params, scoped, cells, anchors, results_dir)
 
-    out_dir = Path(args.output_dir) if args.output_dir else results_dir / "figures"
+    out_dir = Path(args.output_dir) if args.output_dir else Path(figures_dir(results_dir))
     os.makedirs(out_dir, exist_ok=True)
     print(f"\n[図] 出力先: {out_dir}")
-    _recsys_diffusion(summary, out_dir / "recsys_diffusion.png")
-    _polarization_crowd(summary, out_dir / "polarization_crowd.png")
-    _cascade_timeseries(summary, results_dir, out_dir / "cascade_timeseries.png")
+    _recsys_diffusion(cells, out_dir / "recsys_diffusion.png")
+    _polarization_crowd(cells, out_dir / "polarization_crowd.png")
+    _cascade_timeseries(
+        cells, metrics_wide(results_dir / "metrics.csv"), out_dir / "cascade_timeseries.png"
+    )
 
     print("-" * 78)
     return 0
