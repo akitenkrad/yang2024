@@ -30,9 +30,9 @@ use socsim_net::SocialNetwork;
 use crate::config::Config;
 use crate::llm::OasisClient;
 use crate::mechanisms::{
-    ActivationMechanism, AgentActionMechanism, FeedRecommendationMechanism,
-    InfoPropagationMechanism, MetricsMechanism, PostStepMechanism, SharedBudget, SharedClient,
-    SharedMetadata,
+    no_observer, ActivationMechanism, AgentActionMechanism, DecisionObserver,
+    FeedRecommendationMechanism, InfoPropagationMechanism, MetricsMechanism, PostStepMechanism,
+    SharedBudget, SharedClient, SharedMetadata,
 };
 use crate::metrics::{cascade_rows, CascadeRow, StepMetrics};
 use crate::world::{AgentProfile, OasisWorld, Post, ACTIVITY_DIM};
@@ -168,6 +168,25 @@ pub fn run_mock(cfg: &Config) -> Result<SimulationResult, String> {
 /// モデル名と endpoint を知っているのはクライアントを組んだ側だけなので，中で組める口が
 /// 残っていると，そのブロックを埋めないまま記録できてしまう．
 pub fn run_with_client(cfg: &Config, client: OasisClient) -> Result<SimulationResult, String> {
+    run_with_client_observed(cfg, client, no_observer(), |_| {})
+}
+
+/// [`run_with_client`] と同じもので，進捗を数える 2 つの観測子を受け取る．
+///
+/// - `decisions` は leader 1 体の行動を決めるたびに呼ばれる ([`DecisionObserver`])．
+///   `n_leaders > 0` のときの費用はここにある．
+/// - `on_step` は 1 タイムステップごとに呼ばれる．`--n-leaders 0` では leader が
+///   居らず `decisions` が一度も鳴らないので，そのときの単位はこちら．
+///
+/// 呼び出し側 (`main.rs`) が設定を見てどちらを stage に繋ぐかを選ぶ．入口の
+/// [`run_with_client`] は何もしない観測子を渡す薄い包みで，既存の呼び出し側と
+/// テストの挙動は変わらない．
+pub fn run_with_client_observed(
+    cfg: &Config,
+    client: OasisClient,
+    decisions: DecisionObserver,
+    mut on_step: impl FnMut(usize),
+) -> Result<SimulationResult, String> {
     let root = cfg.seed.unwrap_or_else(rand::random);
 
     // 初期世界 (root から派生した init RNG; 決定論的 socsim コア層)．
@@ -197,6 +216,7 @@ pub fn run_with_client(cfg: &Config, client: OasisClient) -> Result<SimulationRe
             Rc::clone(&shared_meta),
             Rc::clone(&shared_budget),
             cfg.llm.clone(),
+            decisions,
         )))
         .add_mechanism(Box::new(InfoPropagationMechanism::default()))
         .add_mechanism(Box::new(MetricsMechanism))
@@ -225,6 +245,7 @@ pub fn run_with_client(cfg: &Config, client: OasisClient) -> Result<SimulationRe
         metrics_history.push(StepMetrics::compute(&w.agents, &w.posts, active, herd, t));
         converged = report.stopped;
         final_step = t;
+        on_step(t);
     })
     .map_err(|e| format!("シミュレーションの実行に失敗: {e}"))?;
 

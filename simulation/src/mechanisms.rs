@@ -39,6 +39,24 @@ pub type SharedMetadata = Rc<RefCell<MetadataCollector>>;
 /// 共有 LLM 呼び出し予算カウンタ (run 全体で残数を管理)．
 pub type SharedBudget = Rc<RefCell<usize>>;
 
+/// [`AgentActionMechanism`] が leader 1 体の行動を決めるたびに 1 つ進む観測子．
+///
+/// 費用はタイムステップではなく leader 1 体の行動決定にある．peripheral は簡易
+/// ポリシーで即座に決まるので，時間はすべて leader の LLM 呼び出しに乗っている．
+/// ローカル Ollama (llama3.2) で実測 2.10s/回なので，`--n-leaders` と
+/// `--activation-rate` を上げれば 1 ステップは容易に数分になる (leader 200 体が
+/// 同時に活性化する設定なら 1 ステップ約 7 分)．そこでステップを数えていたら，
+/// その間ずっと同じ数字が出続ける．
+///
+/// 借用ではなく共有にしてあるのは，メカニズムが `Box<dyn Mechanism<_>>` として
+/// エンジンへ入る `'static` の値で，呼び出し側の `Stage` を借用できないためである．
+pub type DecisionObserver = Rc<RefCell<dyn FnMut()>>;
+
+/// 何も数えない観測子 (進捗を報告しない呼び出し側のための既定)．
+pub fn no_observer() -> DecisionObserver {
+    Rc::new(RefCell::new(|| {}))
+}
+
 /// scratch キー: 当該ステップの active エージェント集合．
 const SCRATCH_ACTIVE: &str = "active_agents";
 /// scratch キー: 当該ステップで決定された行動 (Decision → Interaction)．
@@ -156,21 +174,24 @@ pub struct AgentActionMechanism {
     metadata: SharedMetadata,
     budget: SharedBudget,
     settings: LlmSettings,
+    observer: DecisionObserver,
 }
 
 impl AgentActionMechanism {
-    /// 共有クライアント・メタデータ・予算・LLM 設定から作る．
+    /// 共有クライアント・メタデータ・予算・LLM 設定・観測子から作る．
     pub fn new(
         client: SharedClient,
         metadata: SharedMetadata,
         budget: SharedBudget,
         settings: LlmSettings,
+        observer: DecisionObserver,
     ) -> Self {
         AgentActionMechanism {
             client,
             metadata,
             budget,
             settings,
+            observer,
         }
     }
 
@@ -256,6 +277,17 @@ impl Mechanism<OasisWorld> for AgentActionMechanism {
         for id in active {
             let is_leader = leaders.contains(&id);
             let budget_left = *self.budget.borrow() > 0;
+
+            // 数えるのは «leader 1 体の行動決定»．peripheral は簡易ポリシーで
+            // 即座に決まるので数えない — 数えると，時間のかからない仕事で
+            // カウンタが埋まって費用の在処が読めなくなる．
+            //
+            // 予算切れの leader も数える．予算が尽きた瞬間にカウンタが凍って
+            // 止まったように見えるより，同じ «leader の決定» として数え続ける方が
+            // 読み手にとって正しい (そこから先は簡易ポリシーで速く終わる)．
+            if is_leader {
+                (self.observer.borrow_mut())();
+            }
 
             let decision = if is_leader && budget_left {
                 // --- LLM 呼び出し (leader のみ; 予算内) ---

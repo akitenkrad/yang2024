@@ -13,21 +13,24 @@
 //! `latest` シンボリックリンクもこちらでは作らず，`Run::start` が決めた run
 //! ディレクトリへ書く．
 
+use std::cell::RefCell;
 use std::fs;
 use std::path::Path;
+use std::rc::Rc;
 
 use clap::{Parser, Subcommand};
-use runvault::{Lineage, Run, RunOptions};
+use runvault::{Lineage, Run, RunOptions, Stage};
 use serde::Serialize;
 
 use oasis_simulation::config::{
     parse_platform, parse_recsys, Config, LlmSettings, Platform, RecSysConfig, RecSysKind,
 };
 use oasis_simulation::llm::{build_live_client, OasisClient};
+use oasis_simulation::mechanisms::{no_observer, DecisionObserver};
 use oasis_simulation::metrics::StepMetrics;
 use oasis_simulation::record::{self, ANCHOR_EVENT, DOMAIN, EXPERIMENT, REPO_ID};
 use oasis_simulation::reproduce_mock::build_reproduce_client;
-use oasis_simulation::simulation::{run_with_client, SimulationResult};
+use oasis_simulation::simulation::{run_with_client_observed, SimulationResult};
 
 // ---------------------------------------------------------------------------
 // CLI 定義
@@ -268,6 +271,35 @@ struct ReproduceArgs {
 // 補助
 // ---------------------------------------------------------------------------
 
+/// leader の決定を数える stage を，メカニズムの中から突ける形にして渡す．
+///
+/// 数える場所は [`AgentActionMechanism`](oasis_simulation::mechanisms::AgentActionMechanism)
+/// の中である．メカニズムはエンジンへ `Box<dyn Mechanism<_>>` として入るので
+/// `'static` であり，呼び出し側の `Stage` を借用できない — そこで `Rc` で共有し，
+/// 走り終えたあとに [`close_shared`] で取り出して閉じる．
+fn share_stage(stage: Stage) -> (Rc<RefCell<Option<Stage>>>, DecisionObserver) {
+    let cell = Rc::new(RefCell::new(Some(stage)));
+    let observer: DecisionObserver = {
+        let cell = Rc::clone(&cell);
+        Rc::new(RefCell::new(move || {
+            if let Some(stage) = cell.borrow_mut().as_mut() {
+                stage.tick();
+            }
+        }))
+    };
+    (cell, observer)
+}
+
+/// 共有していた stage を取り出して閉じる．
+///
+/// manifest.csv は `finish()` で封をされる．その後に 1 行足せば，manifest が
+/// 食い違うダイジェストを持つことになる．
+fn close_shared(cell: &Rc<RefCell<Option<Stage>>>) {
+    if let Some(stage) = cell.borrow_mut().take() {
+        stage.close();
+    }
+}
+
 /// スイープ親 run の実験条件 (グリッド定義そのもの)．
 #[derive(Serialize)]
 struct SweepParameters {
@@ -469,7 +501,48 @@ fn cmd_run(args: RunArgs) {
     println!("出力先: {}", rv.dir().display());
     println!("-----------------------------------------------------------------");
 
-    let result = run_with_client(&cfg, client).unwrap_or_else(|e| panic!("実行に失敗: {}", e));
+    // 進捗の単位は設定が決める．leader が居るならその 1 体の行動決定が費用で，
+    // 居なければ決定は一度も起きないので 1 タイムステップが費用になる．
+    //
+    // leader あり: 既定 (--n-agents 200 --n-leaders 20 --activation-rate 0.3
+    // --timesteps 30) の live は leader 活性化が計 56 回程度で，ローカル Ollama
+    // (llama3.2) の実測 2.10s/回では約 2 分．--n-leaders と --activation-rate を
+    // 上げれば 1 ステップが数分に伸びるので，ステップでは粗すぎる．
+    //
+    // leader なし (--n-leaders 0): LLM 呼び出しは 0 回で，`--mock` の実測は 1s．
+    // それでも --n-agents と --timesteps は伸ばせるので，ステップを数える．
+    //
+    // どちらも分母を持たない．[`PostStepMechanism`] が連続ゼロアクション
+    // `--convergence-patience` 回で `request_stop` するので，`timesteps` は
+    // «到達しない上限» である．
+    let leader_driven = cfg.n_leaders > 0;
+    let decisions = if leader_driven {
+        let (cell, observer) = share_stage(rv.unbounded_stage("decisions"));
+        (Some(cell), observer)
+    } else {
+        (None, no_observer())
+    };
+    let mut step_stage = if leader_driven {
+        None
+    } else {
+        Some(rv.unbounded_stage("steps"))
+    };
+
+    let result = run_with_client_observed(&cfg, client, decisions.1, |_| {
+        if let Some(stage) = step_stage.as_mut() {
+            stage.tick();
+        }
+    })
+    .unwrap_or_else(|e| panic!("実行に失敗: {}", e));
+
+    // stage は rv.finish() より先に閉じる (manifest.csv は finish() で封をされる)．
+    if let Some(cell) = &decisions.0 {
+        close_shared(cell);
+    }
+    if let Some(stage) = step_stage {
+        stage.close();
+    }
+
     record::log_simulation(&mut rv, &result);
     record::log_cascades(&mut rv, &result.cascade_rows);
 
@@ -603,6 +676,31 @@ fn cmd_sweep(args: SweepArgs) {
         n_agents_values.iter().map(|&n| (n, Vec::new())).collect();
     let mut done = 0usize;
 
+    // 進捗の単位は設定が決める．leader が居るならその 1 体の行動決定が費用である．
+    // 既定のグリッド (N {200,1000} × activation {0.1,0.3,0.5} × runs 3) を live で
+    // 回すと leader 活性化は計 1,015 回程度で，実測 2.10s/回では約 36 分になる．
+    // 試行 1 本は数分あり，`--n-leaders` を上げれば 1 ステップでも数分になるので，
+    // 試行やステップでは粗すぎる．何回鳴るかは活性化の抽選と収束停止で決まるので
+    // 分母は持てない．
+    //
+    // leader が居ない (--n-leaders 0) 場合は決定が一度も起きないので，単位は試行
+    // 1 本になる．こちらは分母が正確である — 試行の «本数» は値列の `len()` の積で
+    // 確定していて，各試行が収束で早く止まっても減らない (`n_total` と同じ値)．
+    // activation_rate_step は 0.2 のような二進で表せない刻みなので，本数は範囲を
+    // 割らずに値列の `len()` から採る．
+    let leader_driven = args.n_leaders > 0;
+    let decisions = if leader_driven {
+        let (cell, observer) = share_stage(parent.unbounded_stage("decisions"));
+        (Some(cell), observer)
+    } else {
+        (None, no_observer())
+    };
+    let mut trial_stage = if leader_driven {
+        None
+    } else {
+        Some(parent.stage("trials", n_total))
+    };
+
     for &n_agents in &n_agents_values {
         for &activation_rate in &activation_rate_values {
             let params = SweepPointParameters {
@@ -672,8 +770,12 @@ fn cmd_sweep(args: SweepArgs) {
                 };
 
                 let client = build_client(false, &cfg.llm);
-                let result = run_with_client(&cfg, client)
-                    .unwrap_or_else(|e| panic!("実行に失敗: {}", e));
+                let result =
+                    run_with_client_observed(&cfg, client, Rc::clone(&decisions.1), |_| {})
+                        .unwrap_or_else(|e| panic!("実行に失敗: {}", e));
+                if let Some(stage) = trial_stage.as_mut() {
+                    stage.tick();
+                }
 
                 // 旧 sweep_summary.csv の 1 行が terminal 行 1 本に対応する．
                 // metrics.csv に入れると (run_uid, step, scope, name) が重複する．
@@ -702,6 +804,14 @@ fn cmd_sweep(args: SweepArgs) {
                 done, n_total, n_agents, activation_rate, args.runs,
             );
         }
+    }
+
+    // stage は finish() より先に閉じる (manifest.csv は finish() で封をされる)．
+    if let Some(cell) = &decisions.0 {
+        close_shared(cell);
+    }
+    if let Some(stage) = trial_stage {
+        stage.close();
     }
 
     let parent_dir = parent.finish().expect("runvault: sweep 親 run の完了に失敗");
@@ -793,6 +903,7 @@ struct ReproCellResult {
 }
 
 /// 1 推薦器条件を `runs` 回実行して集計セルを作る．
+#[allow(clippy::too_many_arguments)]
 fn run_repro_cell(
     platform: Platform,
     recsys_kind: RecSysKind,
@@ -800,6 +911,8 @@ fn run_repro_cell(
     runs: usize,
     root_seed: u64,
     mock: bool,
+    observer: DecisionObserver,
+    on_trial: &mut dyn FnMut(),
 ) -> ReproCellResult {
     let mut reach = 0.0;
     let mut casc_size = 0.0;
@@ -824,8 +937,10 @@ fn run_repro_cell(
             ..base.clone()
         };
         let client = build_client(mock, &cfg.llm);
-        let result: SimulationResult = run_with_client(&cfg, client)
-            .unwrap_or_else(|e| panic!("実行に失敗 ({}): {e}", recsys_kind.label()));
+        let result: SimulationResult =
+            run_with_client_observed(&cfg, client, Rc::clone(&observer), |_| {})
+                .unwrap_or_else(|e| panic!("実行に失敗 ({}): {e}", recsys_kind.label()));
+        on_trial();
         let first = result.metrics_history.first().unwrap();
         let last = result.metrics_history.last().unwrap();
         reach += last.propagation_reach as f64;
@@ -962,10 +1077,44 @@ fn cmd_reproduce(args: ReproduceArgs) {
     println!("出力先: {}", rv.dir().display());
     println!("-------------------------------------------------");
 
+    // 進捗の単位は設定が決める．leader が居るならその 1 体の行動決定が費用である．
+    // 既定 (N=200 leaders 30 T=24 activation 0.8 runs 3 × recsys 3 種) の live は
+    // leader 活性化が数千回になり，実測 2.10s/回では数時間かかる．1 セル 1 試行では
+    // 粗すぎるので，決定を数える．何回鳴るかは活性化の抽選と収束停止で決まるので
+    // 分母は持てない．
+    //
+    // leader が居ない (--n-leaders 0) 場合は決定が一度も起きないので，単位は試行
+    // 1 本になる．こちらは «条件数 × runs» で本数が確定するので分母を持つ．
+    let leader_driven = n_leaders > 0;
+    let decisions = if leader_driven {
+        let (cell, observer) = share_stage(rv.unbounded_stage("decisions"));
+        (Some(cell), observer)
+    } else {
+        (None, no_observer())
+    };
+    let mut trial_stage = if leader_driven {
+        None
+    } else {
+        Some(rv.stage("trials", recsys_kinds.len() * runs))
+    };
+
     // --- RecSys アブレーション行列 (interest / hot-score / none) ---
     let mut cells: Vec<ReproCell> = Vec::new();
     for &kind in &recsys_kinds {
-        let out = run_repro_cell(platform, kind, &base, runs, args.seed, args.mock);
+        let out = run_repro_cell(
+            platform,
+            kind,
+            &base,
+            runs,
+            args.seed,
+            args.mock,
+            Rc::clone(&decisions.1),
+            &mut || {
+                if let Some(stage) = trial_stage.as_mut() {
+                    stage.tick();
+                }
+            },
+        );
         // 3 条件が 1 本の run に同居するので，(step, scope, name) が衝突しないよう
         // 条件ラベルを名前に付ける．
         record::log_history(&mut rv, Some(&out.cell.label), &out.representative);
@@ -1125,6 +1274,14 @@ fn cmd_reproduce(args: ReproduceArgs) {
     }
     println!("-------------------------------------------------");
     println!("{}/{} アンカーが in-band", n_pass, anchors.len());
+
+    // stage は finish() より先に閉じる (manifest.csv は finish() で封をされる)．
+    if let Some(cell) = &decisions.0 {
+        close_shared(cell);
+    }
+    if let Some(stage) = trial_stage {
+        stage.close();
+    }
 
     let dir = rv.finish().expect("runvault: run の完了に失敗");
     println!("条件別メトリクス → {}/metrics.csv", dir.display());
