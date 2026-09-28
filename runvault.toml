@@ -1,3 +1,480 @@
-# Metric descriptions are not written yet (MYTASK-3382). Until they are,
-# runvault records undeclared metrics instead of refusing them.
-require_docs = false
+# 指標が何を測っているか (runvault の宣言．rs-runvault docs/metrics.ja.md)．
+#
+# 名前は `simulation/src/record.rs` と `simulation/src/main.rs` が記録するものと一致していなければならない．
+#
+# `direction` は «値が大きいほど良いか»．模型の状態や到達量は成績ではないので
+# `none` とし，再現精度やキャッシュ効率のように評価方向が定まる量だけ `up` /
+# `down` とする．
+#
+# 推薦器ラベルを `_` で指標名へ連結するため，3 種類の有限な推薦器を展開して明示する．
+
+[metrics."polarization_index"]
+meaning   = "エージェントの意見値の分散で表した極化指数"
+unit      = "variance"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."opinion_std"]
+meaning   = "エージェントの意見値の標準偏差"
+unit      = "score"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."active_user_count"]
+meaning   = "そのステップで行動したユーザー数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."propagation_reach"]
+meaning   = "投稿伝播が到達した一意なユーザー数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."cascade_size_max"]
+meaning   = "最大情報カスケードに含まれる投稿数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."cascade_max_breadth"]
+meaning   = "最大情報カスケードの最大幅"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."n_posts"]
+meaning   = "その時点までに作成された投稿数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."herd_disagree_rate"]
+meaning   = "反対扱いを受けたユーザーが群衆に追随した割合"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."converged"]
+meaning   = "収束して終わったなら 1，打ち切りなら 0"
+unit      = "boolean"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."final_step"]
+meaning   = "シミュレーションが停止したステップ数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."llm_calls"]
+meaning   = "この run が行った LLM の呼び出し回数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."llm_cache_hits"]
+meaning   = "そのうちキャッシュで済んだ回数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."llm_cache_hit_rate"]
+meaning   = "LLM 呼び出しのうちキャッシュで済んだ割合"
+unit      = "ratio"
+direction = "up"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."n_converged"]
+meaning   = "この条件の試行のうち収束した本数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."mean_final_step"]
+meaning   = "試行群にわたる停止ステップ数の平均"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."mean_final_polarization_index"]
+meaning   = "試行群にわたる最終極化指数の平均"
+unit      = "variance"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."mean_final_opinion_std"]
+meaning   = "試行群にわたる最終意見標準偏差の平均"
+unit      = "score"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."mean_final_propagation_reach"]
+meaning   = "試行群にわたる最終伝播到達数の平均"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."mean_final_cascade_size_max"]
+meaning   = "試行群にわたる最終最大カスケード規模の平均"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."interest_polarization_index"]
+meaning   = "興味マッチ推薦条件におけるエージェントの意見値の分散で表した極化指数"
+unit      = "variance"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."interest_opinion_std"]
+meaning   = "興味マッチ推薦条件におけるエージェントの意見値の標準偏差"
+unit      = "score"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."interest_active_user_count"]
+meaning   = "興味マッチ推薦条件におけるそのステップで行動したユーザー数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."interest_propagation_reach"]
+meaning   = "興味マッチ推薦条件における投稿伝播が到達した一意なユーザー数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."interest_cascade_size_max"]
+meaning   = "興味マッチ推薦条件における最大情報カスケードに含まれる投稿数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."interest_cascade_max_breadth"]
+meaning   = "興味マッチ推薦条件における最大情報カスケードの最大幅"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."interest_n_posts"]
+meaning   = "興味マッチ推薦条件におけるその時点までに作成された投稿数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."interest_herd_disagree_rate"]
+meaning   = "興味マッチ推薦条件における反対扱いを受けたユーザーが群衆に追随した割合"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."interest_mean_propagation_reach"]
+meaning   = "興味マッチ推薦条件における最終伝播到達数の試行平均"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."interest_mean_cascade_size_max"]
+meaning   = "興味マッチ推薦条件における最終最大カスケード規模の試行平均"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."interest_mean_cascade_max_breadth"]
+meaning   = "興味マッチ推薦条件における最終最大カスケード幅の試行平均"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."interest_mean_n_posts"]
+meaning   = "興味マッチ推薦条件における最終投稿数の試行平均"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."interest_mean_polarization_index"]
+meaning   = "興味マッチ推薦条件における最終極化指数の試行平均"
+unit      = "variance"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."interest_mean_polarization_gain"]
+meaning   = "興味マッチ推薦条件における最終極化指数から初期値を引いた差の試行平均"
+unit      = "variance"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."interest_mean_herd_disagree_rate"]
+meaning   = "興味マッチ推薦条件における最終群衆追随率の試行平均"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."interest_mean_final_step"]
+meaning   = "興味マッチ推薦条件における停止ステップ数の試行平均"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."hot-score_polarization_index"]
+meaning   = "ホットスコア推薦条件におけるエージェントの意見値の分散で表した極化指数"
+unit      = "variance"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."hot-score_opinion_std"]
+meaning   = "ホットスコア推薦条件におけるエージェントの意見値の標準偏差"
+unit      = "score"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."hot-score_active_user_count"]
+meaning   = "ホットスコア推薦条件におけるそのステップで行動したユーザー数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."hot-score_propagation_reach"]
+meaning   = "ホットスコア推薦条件における投稿伝播が到達した一意なユーザー数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."hot-score_cascade_size_max"]
+meaning   = "ホットスコア推薦条件における最大情報カスケードに含まれる投稿数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."hot-score_cascade_max_breadth"]
+meaning   = "ホットスコア推薦条件における最大情報カスケードの最大幅"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."hot-score_n_posts"]
+meaning   = "ホットスコア推薦条件におけるその時点までに作成された投稿数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."hot-score_herd_disagree_rate"]
+meaning   = "ホットスコア推薦条件における反対扱いを受けたユーザーが群衆に追随した割合"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."hot-score_mean_propagation_reach"]
+meaning   = "ホットスコア推薦条件における最終伝播到達数の試行平均"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."hot-score_mean_cascade_size_max"]
+meaning   = "ホットスコア推薦条件における最終最大カスケード規模の試行平均"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."hot-score_mean_cascade_max_breadth"]
+meaning   = "ホットスコア推薦条件における最終最大カスケード幅の試行平均"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."hot-score_mean_n_posts"]
+meaning   = "ホットスコア推薦条件における最終投稿数の試行平均"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."hot-score_mean_polarization_index"]
+meaning   = "ホットスコア推薦条件における最終極化指数の試行平均"
+unit      = "variance"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."hot-score_mean_polarization_gain"]
+meaning   = "ホットスコア推薦条件における最終極化指数から初期値を引いた差の試行平均"
+unit      = "variance"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."hot-score_mean_herd_disagree_rate"]
+meaning   = "ホットスコア推薦条件における最終群衆追随率の試行平均"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."hot-score_mean_final_step"]
+meaning   = "ホットスコア推薦条件における停止ステップ数の試行平均"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."none_polarization_index"]
+meaning   = "推薦なし条件におけるエージェントの意見値の分散で表した極化指数"
+unit      = "variance"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."none_opinion_std"]
+meaning   = "推薦なし条件におけるエージェントの意見値の標準偏差"
+unit      = "score"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."none_active_user_count"]
+meaning   = "推薦なし条件におけるそのステップで行動したユーザー数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."none_propagation_reach"]
+meaning   = "推薦なし条件における投稿伝播が到達した一意なユーザー数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."none_cascade_size_max"]
+meaning   = "推薦なし条件における最大情報カスケードに含まれる投稿数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."none_cascade_max_breadth"]
+meaning   = "推薦なし条件における最大情報カスケードの最大幅"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."none_n_posts"]
+meaning   = "推薦なし条件におけるその時点までに作成された投稿数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."none_herd_disagree_rate"]
+meaning   = "推薦なし条件における反対扱いを受けたユーザーが群衆に追随した割合"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."none_mean_propagation_reach"]
+meaning   = "推薦なし条件における最終伝播到達数の試行平均"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."none_mean_cascade_size_max"]
+meaning   = "推薦なし条件における最終最大カスケード規模の試行平均"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."none_mean_cascade_max_breadth"]
+meaning   = "推薦なし条件における最終最大カスケード幅の試行平均"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."none_mean_n_posts"]
+meaning   = "推薦なし条件における最終投稿数の試行平均"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."none_mean_polarization_index"]
+meaning   = "推薦なし条件における最終極化指数の試行平均"
+unit      = "variance"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."none_mean_polarization_gain"]
+meaning   = "推薦なし条件における最終極化指数から初期値を引いた差の試行平均"
+unit      = "variance"
+direction = "none"
+range     = [-1.0, 1.0]
+scope     = ["run"]
+
+[metrics."none_mean_herd_disagree_rate"]
+meaning   = "推薦なし条件における最終群衆追随率の試行平均"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."none_mean_final_step"]
+meaning   = "推薦なし条件における停止ステップ数の試行平均"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."diffusion_cascade"]
+meaning   = "推薦器あり条件の最大カスケード規模"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."diffusion_reach"]
+meaning   = "推薦器あり条件の伝播到達ユーザー数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."polarization_present"]
+meaning   = "推薦器あり条件の最終極化指数"
+unit      = "variance"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."crowd_effect_observed"]
+meaning   = "推薦器あり条件の最終群衆追随率"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."recsys_shapes_diffusion"]
+meaning   = "推薦器条件間の最大カスケード規模の差または範囲"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."anchors_passed"]
+meaning   = "許容帯内だった論文知見アンカーの数"
+unit      = "count"
+direction = "up"
+scope     = ["run"]
+
+[metrics."anchors_total"]
+meaning   = "照合した論文知見アンカーの数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
