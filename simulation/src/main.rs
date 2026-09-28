@@ -48,6 +48,9 @@ struct Cli {
 
     #[command(subcommand)]
     command: Commands,
+    /// Development run: write it under results/_scratch/ so it is never synced to the vault.
+    #[arg(long, global = true)]
+    scratch: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -420,7 +423,7 @@ fn build_recsys(
 // run
 // ---------------------------------------------------------------------------
 
-fn cmd_run(args: RunArgs) {
+fn cmd_run(args: RunArgs, scratch: bool) {
     let platform = parse_platform(&args.platform).unwrap_or_else(|e| panic!("{}", e));
     let recsys = build_recsys(platform, &args.recsys, args.k_in, args.k_out);
 
@@ -467,6 +470,7 @@ fn cmd_run(args: RunArgs) {
     let parameters = cfg.to_run_config_json(seed, args.mock);
     let mut rv = Run::start(
         RunOptions::new(EXPERIMENT, "run")
+            .scratch(scratch)
             .repo_id(REPO_ID)
             .domain(DOMAIN)
             .results_root(&args.output_dir)
@@ -575,7 +579,7 @@ fn cmd_run(args: RunArgs) {
 // sweep
 // ---------------------------------------------------------------------------
 
-fn cmd_sweep(args: SweepArgs) {
+fn cmd_sweep(args: SweepArgs, scratch: bool) {
     let platform = parse_platform(&args.platform).unwrap_or_else(|e| panic!("{}", e));
     let recsys_kind = match &args.recsys {
         Some(s) => parse_recsys(s).unwrap_or_else(|e| panic!("{e}")),
@@ -638,6 +642,7 @@ fn cmd_sweep(args: SweepArgs) {
     // sweep_id は runvault が親の run_slug で埋める．
     let parent = Run::start(
         RunOptions::new(EXPERIMENT, "sweep")
+            .scratch(scratch)
             .repo_id(REPO_ID)
             .domain(DOMAIN)
             .results_root(&args.output_dir)
@@ -723,6 +728,7 @@ fn cmd_sweep(args: SweepArgs) {
             // 同じ条件の繰り返しは無いので replicate_index は 0．
             let mut child = Run::start(
                 RunOptions::new(EXPERIMENT, "sweep-point")
+                    .scratch(scratch)
                     .repo_id(REPO_ID)
                     .domain(DOMAIN)
                     .results_root(&args.output_dir)
@@ -973,7 +979,7 @@ fn run_repro_cell(
     }
 }
 
-fn cmd_reproduce(args: ReproduceArgs) {
+fn cmd_reproduce(args: ReproduceArgs, scratch: bool) {
     let platform = parse_platform(&args.platform).unwrap_or_else(|e| panic!("{}", e));
     let recsys_kinds: Vec<RecSysKind> = split_csv(&args.recsys_values)
         .iter()
@@ -1051,6 +1057,7 @@ fn cmd_reproduce(args: ReproduceArgs) {
 
     let mut rv = Run::start(
         RunOptions::new(EXPERIMENT, "reproduce")
+            .scratch(scratch)
             .repo_id(REPO_ID)
             .domain(DOMAIN)
             .results_root(&args.output_dir)
@@ -1294,12 +1301,13 @@ fn cmd_reproduce(args: ReproduceArgs) {
 
 fn main() {
     let cli = Cli::parse();
+    let scratch = cli.scratch;
     if let Some(host) = cli.ollama_host.as_deref() {
         std::env::set_var("OLLAMA_HOST", host);
     }
     match cli.command {
-        Commands::Run(args) => cmd_run(args),
-        Commands::Sweep(args) => cmd_sweep(args),
-        Commands::Reproduce(args) => cmd_reproduce(args),
+        Commands::Run(args) => cmd_run(args, scratch),
+        Commands::Sweep(args) => cmd_sweep(args, scratch),
+        Commands::Reproduce(args) => cmd_reproduce(args, scratch),
     }
 }

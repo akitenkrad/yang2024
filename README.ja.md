@@ -56,6 +56,11 @@ uv run oasis-tools visualize
 cargo run --release -- run --n-leaders 0 --n-agents 40 --timesteps 10 --seed 42
 ```
 
+
+## Scratch run
+
+開発中・デバッグ中・動作確認の実行には `--scratch` を付ける．run は `results/_scratch/` に作られ，同期されない．最新の scratch run は `runvault path --scratch` で取得できる．
+
 ## ドキュメント
 
 - [ユースケース](docs/usecases.ja.md) — 本プロジェクトでできること，および他ドキュメントへの案内．
