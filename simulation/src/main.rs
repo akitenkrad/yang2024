@@ -443,6 +443,7 @@ fn cmd_run(args: RunArgs, scratch: bool) {
         convergence_patience: args.convergence_patience,
         seed: Some(seed),
         llm: LlmSettings {
+            think: None,
             temperature: args.temperature,
             seed: args.llm_seed,
             // mock は in-memory cache なので永続キャッシュは無効化する．
@@ -606,6 +607,7 @@ fn cmd_sweep(args: SweepArgs, scratch: bool) {
     let n_total = n_agents_values.len() * activation_rate_values.len() * args.runs;
 
     let llm_settings = LlmSettings {
+        think: None,
         temperature: args.temperature,
         seed: args.llm_seed,
         cache_path: Some(args.cache_path.clone()),
@@ -1018,6 +1020,7 @@ fn cmd_reproduce(args: ReproduceArgs, scratch: bool) {
         convergence_patience: timesteps + 1,
         seed: Some(args.seed),
         llm: LlmSettings {
+            think: None,
             temperature: args.temperature,
             seed: args.llm_seed,
             cache_path: if args.mock {

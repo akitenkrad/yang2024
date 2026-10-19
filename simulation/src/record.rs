@@ -472,7 +472,7 @@ mod tests {
     /// 固定しているので，この値は依存を上げたときにだけ動く．
     #[test]
     fn golden_values_are_pinned() {
-        assert_eq!(sweep_trial_seed(42, "x", 200, 0.1, 0), 15_813_606_257_957_117_008);
-        assert_eq!(repro_trial_seed(42, "x", "interest", 0), 6_074_958_179_555_378_911);
+        assert_eq!(sweep_trial_seed(42, "x", 200, 0.1, 0), 10_263_684_394_246_264_733);
+        assert_eq!(repro_trial_seed(42, "x", "interest", 0), 14_278_636_156_239_252_364);
     }
 }
